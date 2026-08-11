@@ -1,0 +1,47 @@
+{
+  "device": {
+    "display": "ST7789",
+    "width": 240,
+    "height": 280,
+    "interface": "SPI"
+  },
+  "states": ["SAFE", "WARNING", "EMERGENCY"],
+  "sampleVitals": {
+    "safe": {
+      "heartRate": 76,
+      "bloodPressure": {
+        "systolic": 118,
+        "diastolic": 76,
+        "unit": "mmHg"
+      },
+      "movement": "NORMAL",
+      "riskScore": 14
+    },
+    "warning": {
+      "heartRate": 118,
+      "bloodPressure": {
+        "systolic": 178,
+        "diastolic": 108,
+        "unit": "mmHg"
+      },
+      "movement": "UNSTABLE",
+      "riskScore": 78,
+      "countdownSeconds": 10
+    },
+    "emergency": {
+      "heartRate": 54,
+      "bloodPressure": {
+        "systolic": 190,
+        "diastolic": 120,
+        "unit": "mmHg"
+      },
+      "movement": "LOW",
+      "riskScore": 94,
+      "mockService": {
+        "familyNotified": true,
+        "locationShared": true,
+        "helpRequested": true
+      }
+    }
+  }
+}
