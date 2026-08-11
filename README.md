@@ -223,3 +223,27 @@ When the exact sensor BOM is fixed, implement the `readRealSensors()` adapter wi
 ## What remains hardware-dependent
 
 The exact sensor drivers are intentionally isolated because the current board is known but the team's actual sensor modules are not yet specified. Once the team provides the exact PPG/SpO2, IMU and BP hardware part numbers, only the MCU sensor adapter needs to be replaced.
+
+## v4 Upgrade Layer
+
+Version 4 is a drop-in upgrade layer over the v3 runtime. It adds independent
+activity/posture, fall, and physiology branches without changing the v3 sensor
+contract or safety API:
+
+```text
+v3 sensor packets -> v4 window features -> activity/fall/physiology models
+                  -> v4 SafetyFusion -> existing alerts/API integration
+```
+
+The v4 public datasets are not a synchronized multimodal clinical dataset.
+Train each branch from its appropriate source and fuse predictions at runtime.
+The datasets and benchmark results are for software validation only, not
+clinical performance claims.
+
+```powershell
+python scripts/build_training_tables.py
+python scripts/train_v4.py
+```
+
+See `docs/DATASET_MATRIX.md` and `config/v4.yaml` for the v4 data and safety
+configuration.

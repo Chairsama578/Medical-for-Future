@@ -1,0 +1,12 @@
+sample_rate_hz: 5
+window_seconds: 8
+activity:
+  n_estimators: 250
+fall:
+  n_estimators: 250
+physiology:
+  n_estimators: 250
+safety:
+  warning_score: 0.55
+  critical_score: 0.80
+  persistence_windows: 2

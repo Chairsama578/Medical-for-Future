@@ -10,3 +10,5 @@ models/*.pkl
 data/raw/*
 !data/raw/README.md
 data/generated/*.csv
+data/unified/*
+models/v4/*.joblib

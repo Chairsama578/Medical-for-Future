@@ -9,3 +9,5 @@ pydantic>=2.8,<3
 msgpack>=1.0,<2
 requests>=2.32,<3
 pytest>=8.0,<9
+tqdm>=4.66
+wfdb>=4.1
