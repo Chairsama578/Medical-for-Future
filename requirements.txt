@@ -11,3 +11,4 @@ requests>=2.32,<3
 pytest>=8.0,<9
 tqdm>=4.66
 wfdb>=4.1
+pyserial>=3.5

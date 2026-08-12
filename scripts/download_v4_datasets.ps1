@@ -8,3 +8,4 @@ Invoke-WebRequest "https://archive.ics.uci.edu/static/public/341/smartphone+base
 Expand-Archive -Force "data/raw/uci_postural/uci_postural.zip" "data/raw/uci_postural"
 
 Write-Host "UCI datasets downloaded. UP-Fall/BIDMC/CVES/MIMIC require their respective download/access procedures."
+Write-Host "UP-Fall raw sensor dataset is not automatically downloadable from the historical Challenge UP page. Acquire the original dataset manually from an authorized/verified source, then place it under data/raw/upfall/."

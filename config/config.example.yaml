@@ -1,4 +1,5 @@
 mode: simulator
+v4_enabled: true
 poll_hz: 5
 window_seconds: 8
 model_path: models/strokeguard_edge.json

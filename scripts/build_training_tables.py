@@ -40,11 +40,18 @@ if not frames:
 
 tables = pd.concat(frames, ignore_index=True)
 tables.to_csv(TRAINING / "windows_all.csv", index=False)
-tables[tables.activity != "UNKNOWN"].to_csv(TRAINING / "activity.csv", index=False)
-tables[tables.fall_state.isin(["FALL", "NO_FALL"])].to_csv(
-    TRAINING / "fall.csv", index=False
-)
-tables[tables.physiology_state.isin(["NORMAL", "ABNORMAL"])].to_csv(
-    TRAINING / "physiology.csv", index=False
-)
+
+
+def write_branch(name, label, valid_values, minimum_classes=2):
+    branch = tables[tables[label].isin(valid_values)]
+    if branch.empty or branch[label].nunique() < minimum_classes:
+        print(f"[SKIP] {name}: insufficient labeled classes")
+        return
+    branch.to_csv(TRAINING / f"{name}.csv", index=False)
+    print(f"Wrote {name}: rows={len(branch)} classes={branch[label].nunique()}")
+
+
+write_branch("activity", "activity", set(tables.activity) - {"UNKNOWN"})
+write_branch("fall", "fall_state", {"FALL", "NO_FALL"})
+write_branch("physiology", "physiology_state", {"NORMAL", "ABNORMAL"})
 print("Training tables written.")

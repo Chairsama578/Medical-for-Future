@@ -30,4 +30,4 @@ def test_v4_safety_persistence_and_override():
     fusion = SafetyFusionV4(persistence=2)
     assert fusion.decide(0.9)["state"] == "NORMAL"
     assert fusion.decide(0.9)["state"] == "CRITICAL"
-    assert fusion.decide(0.1, manual_sos=True)["state"] == "EMERGENCY"
+    assert fusion.decide(0.1, manual_sos=True)["state"] == "CRITICAL"

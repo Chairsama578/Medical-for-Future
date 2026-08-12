@@ -1,5 +1,6 @@
 sample_rate_hz: 5
 window_seconds: 8
+v4_enabled: true
 activity:
   n_estimators: 250
 fall:

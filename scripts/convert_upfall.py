@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 import re
 
 import numpy as np
@@ -7,12 +8,30 @@ import pandas as pd
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 ROOT = PROJECT_ROOT / "data" / "raw" / "upfall"
 OUTPUT = PROJECT_ROOT / "data" / "unified"
+PROVENANCE = ROOT / "provenance.json"
+
+
+def verified_mapping():
+    if not PROVENANCE.exists():
+        raise SystemExit(
+            "UP-Fall provenance.json is required. Verify the acquired source and "
+            "official activity/fall mapping before conversion."
+        )
+    metadata = json.loads(PROVENANCE.read_text(encoding="utf-8"))
+    if not metadata.get("activity_mapping_verified") or not metadata.get("fall_mapping_verified"):
+        raise SystemExit(
+            "Official activity mapping must be verified against the acquired "
+            "UP-Fall source before conversion."
+        )
+    activity_map = metadata.get("activity_mapping")
+    fall_map = metadata.get("fall_state_mapping")
+    if not isinstance(activity_map, dict) or not isinstance(fall_map, dict):
+        raise SystemExit("provenance.json must contain verified activity_mapping and fall_state_mapping")
+    return activity_map, fall_map
+
+
+ACTIVITY, FALL_STATE = verified_mapping()
 OUTPUT.mkdir(parents=True, exist_ok=True)
-ACTIVITY = {
-    1: "FALL", 2: "FALL", 3: "FALL", 4: "FALL", 5: "FALL",
-    6: "WALKING", 7: "STANDING", 8: "PICKING_OBJECT", 9: "SITTING",
-    10: "JUMPING", 11: "LYING",
-}
 rows = []
 for path in ROOT.rglob("*.csv"):
     try:
@@ -45,8 +64,8 @@ for path in ROOT.rglob("*.csv"):
     activity_id = int(activity.group(1)) if activity else -1
     frame["subject_id"] = subject.group(1) if subject else "unknown"
     frame["source_dataset"] = "upfall"
-    frame["activity"] = ACTIVITY.get(activity_id, "UNKNOWN")
-    frame["fall_state"] = "FALL" if activity_id in range(1, 6) else "NO_FALL"
+    frame["activity"] = ACTIVITY.get(str(activity_id), "UNKNOWN")
+    frame["fall_state"] = FALL_STATE.get(str(activity_id), "UNKNOWN")
     frame["physiology_state"] = "UNKNOWN"
     rows.append(frame)
 if rows:

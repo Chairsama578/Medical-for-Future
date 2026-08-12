@@ -1,0 +1,670 @@
+{
+  "timestamp_utc": "2026-08-12T03:00:18.996288+00:00",
+  "dataset": "uci_har_v1+uci_postural_v2.1",
+  "dataset_path": "data\\unified\\training\\activity.csv",
+  "feature_names": [
+    "accel_x_mean",
+    "accel_x_std",
+    "accel_x_min",
+    "accel_x_max",
+    "accel_y_mean",
+    "accel_y_std",
+    "accel_y_min",
+    "accel_y_max",
+    "accel_z_mean",
+    "accel_z_std",
+    "accel_z_min",
+    "accel_z_max",
+    "gyro_x_mean",
+    "gyro_x_std",
+    "gyro_x_min",
+    "gyro_x_max",
+    "gyro_y_mean",
+    "gyro_y_std",
+    "gyro_y_min",
+    "gyro_y_max",
+    "gyro_z_mean",
+    "gyro_z_std",
+    "gyro_z_min",
+    "gyro_z_max",
+    "accel_mag_mean",
+    "accel_mag_std",
+    "accel_mag_max",
+    "jerk_std",
+    "jerk_max"
+  ],
+  "feature_count": 29,
+  "excluded_unavailable_features": [
+    "heart_rate_mean",
+    "heart_rate_std",
+    "heart_rate_min",
+    "heart_rate_max",
+    "spo2_mean",
+    "spo2_std",
+    "spo2_min",
+    "spo2_max",
+    "sbp_mean",
+    "sbp_std",
+    "sbp_min",
+    "sbp_max",
+    "dbp_mean",
+    "dbp_std",
+    "dbp_min",
+    "dbp_max"
+  ],
+  "classes": [
+    "LAYING",
+    "LIE_TO_SIT",
+    "LIE_TO_STAND",
+    "SITTING",
+    "SIT_TO_LIE",
+    "SIT_TO_STAND",
+    "STANDING",
+    "STAND_TO_LIE",
+    "STAND_TO_SIT",
+    "WALKING",
+    "WALKING_DOWNSTAIRS",
+    "WALKING_UPSTAIRS"
+  ],
+  "random_seed": 42,
+  "validation_seed": 43,
+  "model_configuration": {
+    "classifier": "RandomForestClassifier",
+    "n_estimators": 250,
+    "class_weight": "balanced_subsample",
+    "scaling": "none"
+  },
+  "subject_split": {
+    "train": [
+      "1",
+      "10",
+      "11",
+      "12",
+      "13",
+      "16",
+      "19",
+      "2",
+      "21",
+      "22",
+      "26",
+      "28",
+      "29",
+      "3",
+      "4",
+      "5",
+      "6",
+      "8"
+    ],
+    "validation": [
+      "14",
+      "15",
+      "20",
+      "24",
+      "27",
+      "9"
+    ],
+    "test": [
+      "17",
+      "18",
+      "23",
+      "25",
+      "30",
+      "7"
+    ]
+  },
+  "row_counts": {
+    "train": 24191,
+    "validation": 8292,
+    "test": 8787
+  },
+  "class_counts": {
+    "train": {
+      "LAYING": 4093,
+      "LIE_TO_SIT": 331,
+      "LIE_TO_STAND": 311,
+      "SITTING": 3755,
+      "SIT_TO_LIE": 352,
+      "SIT_TO_STAND": 243,
+      "STANDING": 4113,
+      "STAND_TO_LIE": 404,
+      "STAND_TO_SIT": 305,
+      "WALKING": 3679,
+      "WALKING_DOWNSTAIRS": 3159,
+      "WALKING_UPSTAIRS": 3446
+    },
+    "validation": {
+      "LAYING": 1391,
+      "LIE_TO_SIT": 105,
+      "LIE_TO_STAND": 116,
+      "SITTING": 1343,
+      "SIT_TO_LIE": 133,
+      "SIT_TO_STAND": 75,
+      "STANDING": 1393,
+      "STAND_TO_LIE": 170,
+      "STAND_TO_SIT": 108,
+      "WALKING": 1184,
+      "WALKING_DOWNSTAIRS": 1085,
+      "WALKING_UPSTAIRS": 1189
+    },
+    "test": {
+      "LAYING": 1464,
+      "LIE_TO_SIT": 123,
+      "LIE_TO_STAND": 117,
+      "SITTING": 1319,
+      "SIT_TO_LIE": 134,
+      "SIT_TO_STAND": 86,
+      "STANDING": 1500,
+      "STAND_TO_LIE": 144,
+      "STAND_TO_SIT": 104,
+      "WALKING": 1321,
+      "WALKING_DOWNSTAIRS": 1209,
+      "WALKING_UPSTAIRS": 1266
+    }
+  },
+  "metrics": {
+    "validation": {
+      "accuracy": 0.8667390255668114,
+      "balanced_accuracy": 0.7010235967237911,
+      "macro_precision": 0.7376180406210376,
+      "macro_recall": 0.7010235967237911,
+      "macro_f1": 0.7137549083108955,
+      "per_class": {
+        "LAYING": {
+          "precision": 0.9728765167737331,
+          "recall": 0.9798705966930266,
+          "f1": 0.9763610315186246,
+          "support": 1391
+        },
+        "LIE_TO_SIT": {
+          "precision": 0.5470085470085471,
+          "recall": 0.6095238095238096,
+          "f1": 0.5765765765765766,
+          "support": 105
+        },
+        "LIE_TO_STAND": {
+          "precision": 0.5595238095238095,
+          "recall": 0.4051724137931034,
+          "f1": 0.47,
+          "support": 116
+        },
+        "SITTING": {
+          "precision": 0.9390148553557467,
+          "recall": 0.8942665673864483,
+          "f1": 0.916094584286804,
+          "support": 1343
+        },
+        "SIT_TO_LIE": {
+          "precision": 0.4935064935064935,
+          "recall": 0.5714285714285714,
+          "f1": 0.5296167247386759,
+          "support": 133
+        },
+        "SIT_TO_STAND": {
+          "precision": 0.7058823529411765,
+          "recall": 0.64,
+          "f1": 0.6713286713286714,
+          "support": 75
+        },
+        "STANDING": {
+          "precision": 0.8745046235138706,
+          "recall": 0.9504666188083274,
+          "f1": 0.9109047127622979,
+          "support": 1393
+        },
+        "STAND_TO_LIE": {
+          "precision": 0.5185185185185185,
+          "recall": 0.32941176470588235,
+          "f1": 0.4028776978417266,
+          "support": 170
+        },
+        "STAND_TO_SIT": {
+          "precision": 0.6756756756756757,
+          "recall": 0.46296296296296297,
+          "f1": 0.5494505494505495,
+          "support": 108
+        },
+        "WALKING": {
+          "precision": 0.8430493273542601,
+          "recall": 0.793918918918919,
+          "f1": 0.8177468464549804,
+          "support": 1184
+        },
+        "WALKING_DOWNSTAIRS": {
+          "precision": 0.9480901077375122,
+          "recall": 0.8921658986175115,
+          "f1": 0.9192782526115859,
+          "support": 1085
+        },
+        "WALKING_UPSTAIRS": {
+          "precision": 0.7737656595431098,
+          "recall": 0.8830950378469302,
+          "f1": 0.8248232521602514,
+          "support": 1189
+        }
+      },
+      "confusion_matrix": [
+        [
+          1363,
+          1,
+          2,
+          4,
+          12,
+          0,
+          1,
+          6,
+          0,
+          2,
+          0,
+          0
+        ],
+        [
+          5,
+          64,
+          18,
+          6,
+          1,
+          1,
+          4,
+          4,
+          1,
+          1,
+          0,
+          0
+        ],
+        [
+          14,
+          30,
+          47,
+          0,
+          3,
+          3,
+          1,
+          1,
+          1,
+          5,
+          6,
+          5
+        ],
+        [
+          2,
+          5,
+          0,
+          1201,
+          1,
+          2,
+          126,
+          0,
+          5,
+          1,
+          0,
+          0
+        ],
+        [
+          9,
+          2,
+          4,
+          4,
+          76,
+          3,
+          2,
+          30,
+          0,
+          2,
+          0,
+          1
+        ],
+        [
+          0,
+          1,
+          1,
+          3,
+          0,
+          48,
+          14,
+          0,
+          6,
+          2,
+          0,
+          0
+        ],
+        [
+          1,
+          5,
+          2,
+          43,
+          2,
+          6,
+          1324,
+          4,
+          1,
+          4,
+          0,
+          1
+        ],
+        [
+          6,
+          5,
+          5,
+          8,
+          57,
+          1,
+          8,
+          56,
+          10,
+          9,
+          1,
+          4
+        ],
+        [
+          0,
+          4,
+          3,
+          10,
+          2,
+          4,
+          26,
+          2,
+          50,
+          6,
+          0,
+          1
+        ],
+        [
+          1,
+          0,
+          2,
+          0,
+          0,
+          0,
+          3,
+          3,
+          0,
+          940,
+          23,
+          212
+        ],
+        [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          34,
+          968,
+          83
+        ],
+        [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          5,
+          2,
+          0,
+          109,
+          23,
+          1050
+        ]
+      ]
+    },
+    "test": {
+      "accuracy": 0.8082394446341186,
+      "balanced_accuracy": 0.668431926353294,
+      "macro_precision": 0.7219577950046143,
+      "macro_recall": 0.668431926353294,
+      "macro_f1": 0.6853969303717952,
+      "per_class": {
+        "LAYING": {
+          "precision": 0.9589131875414182,
+          "recall": 0.9883879781420765,
+          "f1": 0.9734275142953246,
+          "support": 1464
+        },
+        "LIE_TO_SIT": {
+          "precision": 0.574468085106383,
+          "recall": 0.6585365853658537,
+          "f1": 0.6136363636363636,
+          "support": 123
+        },
+        "LIE_TO_STAND": {
+          "precision": 0.6349206349206349,
+          "recall": 0.3418803418803419,
+          "f1": 0.4444444444444444,
+          "support": 117
+        },
+        "SITTING": {
+          "precision": 0.7619367854741089,
+          "recall": 0.8589840788476119,
+          "f1": 0.8075552387740556,
+          "support": 1319
+        },
+        "SIT_TO_LIE": {
+          "precision": 0.576271186440678,
+          "recall": 0.5074626865671642,
+          "f1": 0.5396825396825397,
+          "support": 134
+        },
+        "SIT_TO_STAND": {
+          "precision": 0.6206896551724138,
+          "recall": 0.627906976744186,
+          "f1": 0.6242774566473989,
+          "support": 86
+        },
+        "STANDING": {
+          "precision": 0.81419624217119,
+          "recall": 0.78,
+          "f1": 0.7967313585291114,
+          "support": 1500
+        },
+        "STAND_TO_LIE": {
+          "precision": 0.5982905982905983,
+          "recall": 0.4861111111111111,
+          "f1": 0.5363984674329502,
+          "support": 144
+        },
+        "STAND_TO_SIT": {
+          "precision": 0.6825396825396826,
+          "recall": 0.41346153846153844,
+          "f1": 0.5149700598802395,
+          "support": 104
+        },
+        "WALKING": {
+          "precision": 0.73568281938326,
+          "recall": 0.8849356548069645,
+          "f1": 0.8034364261168385,
+          "support": 1321
+        },
+        "WALKING_DOWNSTAIRS": {
+          "precision": 0.9230769230769231,
+          "recall": 0.674937965260546,
+          "f1": 0.7797419971333015,
+          "support": 1209
+        },
+        "WALKING_UPSTAIRS": {
+          "precision": 0.7825077399380805,
+          "recall": 0.7985781990521327,
+          "f1": 0.7904612978889758,
+          "support": 1266
+        }
+      },
+      "confusion_matrix": [
+        [
+          1447,
+          1,
+          2,
+          0,
+          3,
+          0,
+          4,
+          3,
+          0,
+          2,
+          0,
+          2
+        ],
+        [
+          12,
+          81,
+          9,
+          11,
+          0,
+          0,
+          9,
+          0,
+          0,
+          1,
+          0,
+          0
+        ],
+        [
+          13,
+          42,
+          40,
+          2,
+          3,
+          2,
+          2,
+          1,
+          0,
+          6,
+          5,
+          1
+        ],
+        [
+          2,
+          5,
+          0,
+          1133,
+          0,
+          1,
+          175,
+          0,
+          3,
+          0,
+          0,
+          0
+        ],
+        [
+          19,
+          2,
+          0,
+          9,
+          68,
+          0,
+          1,
+          34,
+          1,
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0,
+          4,
+          0,
+          54,
+          22,
+          0,
+          2,
+          3,
+          0,
+          1
+        ],
+        [
+          1,
+          3,
+          4,
+          304,
+          3,
+          3,
+          1170,
+          3,
+          3,
+          5,
+          0,
+          1
+        ],
+        [
+          12,
+          3,
+          0,
+          0,
+          38,
+          1,
+          11,
+          70,
+          3,
+          2,
+          0,
+          4
+        ],
+        [
+          0,
+          2,
+          3,
+          24,
+          1,
+          8,
+          12,
+          0,
+          43,
+          3,
+          2,
+          6
+        ],
+        [
+          3,
+          2,
+          4,
+          0,
+          1,
+          2,
+          10,
+          1,
+          3,
+          1169,
+          23,
+          103
+        ],
+        [
+          0,
+          0,
+          1,
+          0,
+          1,
+          0,
+          1,
+          0,
+          1,
+          226,
+          816,
+          163
+        ],
+        [
+          0,
+          0,
+          0,
+          0,
+          0,
+          16,
+          20,
+          5,
+          4,
+          172,
+          38,
+          1011
+        ]
+      ]
+    },
+    "training_seconds": 6.565789799904451,
+    "inference_ms_per_window": 81.63328760000877
+  }
+}
