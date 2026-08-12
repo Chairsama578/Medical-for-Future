@@ -11,11 +11,11 @@ from strokeguard_v4.safety import SafetyFusionV4
 
 
 parser = argparse.ArgumentParser(description="Synthetic physiology risk demo")
-parser.add_argument("--scenario", choices=sorted(SCENARIOS), default="normal")
+parser.add_argument("--scenario", choices=sorted(set(SCENARIOS) | {"critical"}), default="normal")
 parser.add_argument("--windows", type=int, default=3)
 args = parser.parse_args()
 
-simulator = PhysiologySimulator(args.scenario)
+simulator = PhysiologySimulator("critical_physiology" if args.scenario == "critical" else args.scenario)
 engine = PhysiologyRiskEngine()
 fusion = SafetyFusionV4()
 for index in range(args.windows):

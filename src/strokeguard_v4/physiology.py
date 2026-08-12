@@ -82,15 +82,18 @@ def _mean_optional(values) -> float | None:
     return float(np.mean(valid)) if valid else None
 
 
-def validate_packet(packet: SensorPacket) -> SensorQualityReport:
+def validate_packet(packet: SensorPacket, require_imu: bool = True) -> SensorQualityReport:
     reasons = []
     required = {
         "heart_rate_bpm": (packet.heart_rate_bpm, 30.0, 220.0),
         "spo2_pct": (packet.spo2_pct, 70.0, 100.0),
-        "accel_x_g": (packet.accel_x_g, -16.0, 16.0),
-        "accel_y_g": (packet.accel_y_g, -16.0, 16.0),
-        "accel_z_g": (packet.accel_z_g, -16.0, 16.0),
     }
+    if require_imu:
+        required.update({
+            "accel_x_g": (packet.accel_x_g, -16.0, 16.0),
+            "accel_y_g": (packet.accel_y_g, -16.0, 16.0),
+            "accel_z_g": (packet.accel_z_g, -16.0, 16.0),
+        })
     valid_count = 0
     for name, (value, low, high) in required.items():
         if not _finite(value):
@@ -145,17 +148,18 @@ def extract_physiology_features(packets: Iterable[SensorPacket]) -> dict[str, fl
     for prefix, name in [("sbp", "systolic_bp_mmhg"), ("dbp", "diastolic_bp_mmhg")]:
         add_stats(prefix, series(name))
 
-    accel = np.asarray([
-        [float(packet.accel_x_g), float(packet.accel_y_g), float(packet.accel_z_g)]
-        for packet in values
-    ])
-    magnitude = np.linalg.norm(accel, axis=1)
-    jerk = np.diff(magnitude)
-    features["accel_mag_mean"] = float(np.mean(magnitude))
-    features["accel_mag_std"] = float(np.std(magnitude))
-    features["accel_mag_max"] = float(np.max(magnitude))
-    features["jerk_std"] = float(np.std(jerk)) if len(jerk) else 0.0
-    features["jerk_max"] = float(np.max(np.abs(jerk))) if len(jerk) else 0.0
+    if all(all(_finite(getattr(packet, axis)) for axis in ("accel_x_g", "accel_y_g", "accel_z_g")) for packet in values):
+        accel = np.asarray([
+            [float(packet.accel_x_g), float(packet.accel_y_g), float(packet.accel_z_g)]
+            for packet in values
+        ])
+        magnitude = np.linalg.norm(accel, axis=1)
+        jerk = np.diff(magnitude)
+        features["accel_mag_mean"] = float(np.mean(magnitude))
+        features["accel_mag_std"] = float(np.std(magnitude))
+        features["accel_mag_max"] = float(np.max(magnitude))
+        features["jerk_std"] = float(np.std(jerk)) if len(jerk) else 0.0
+        features["jerk_max"] = float(np.max(np.abs(jerk))) if len(jerk) else 0.0
     return features
 
 
@@ -169,11 +173,11 @@ class PhysiologyRiskEngine:
         self.critical_windows = 0
         self.previous_features: dict[str, float] = {}
 
-    def decide(self, packets: Iterable[SensorPacket], activity_result=None) -> PhysiologyRiskResult:
+    def decide(self, packets: Iterable[SensorPacket], activity_result=None, require_imu: bool = True) -> PhysiologyRiskResult:
         values = list(packets)
         if not values:
             return PhysiologyRiskResult(0.0, "UNKNOWN", ["no_sensor_window"], 0.0, 0.0, {})
-        reports = [validate_packet(packet) for packet in values]
+        reports = [validate_packet(packet, require_imu=require_imu) for packet in values]
         quality = min(report.score for report in reports)
         quality_reasons = sorted({reason for report in reports for reason in report.reasons})
         for previous, current in zip(values, values[1:]):

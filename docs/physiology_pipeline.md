@@ -86,5 +86,18 @@ The Arduino firmware and `SensorPacket` JSON contract were not modified by
 this layer. Real sensor adapters remain hardware-dependent and must be added
 only after the sensor BOM is confirmed.
 
+## Clinical Dataset Status
+
+BIDMC is the planned open physiology signal-validation dataset:
+
+```text
+https://www.physionet.org/content/bidmc/1.0.0/
+```
+
+It is not installed locally in this repository. No physiology ML model has
+been trained from BIDMC. BIDMC does not provide a StrokeGuard stroke target;
+HR/SpO2/BP abnormalities must not be relabeled as stroke. The current demo
+therefore uses the rule-based engine and its temporal safety policy.
+
 StrokeGuard is an assistive early-warning prototype. It does not diagnose
 stroke.
