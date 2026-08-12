@@ -30,13 +30,16 @@ void DeviceUi::showSafe(const VitalSigns& vitals) {
   clearScreen();
   drawHeader("SAFE", COLOR_SAFE);
 
-  drawReadingCard(10, 42, 105, 72, "HR", String(vitals.heartRate), "BPM", COLOR_SAFE);
-  drawReadingCard(125, 42, 105, 72, "AI RISK", String(vitals.riskScore) + "%", "LOW", COLOR_SAFE);
-  drawReadingCard(10, 124, 220, 72, "BLOOD PRESSURE", String(vitals.systolic) + "/" + String(vitals.diastolic), "mmHg", COLOR_BLUE);
+  drawReadingCard(10, 42, 105, 60, "HR", String(vitals.heartRate), "BPM", COLOR_SAFE);
+  drawReadingCard(125, 42, 105, 60, "SpO2", String(vitals.spo2), "%", COLOR_BLUE);
+  drawReadingCard(10, 110, 105, 60, "BP", String(vitals.systolic) + "/" + String(vitals.diastolic), "mmHg", COLOR_BLUE);
+  drawReadingCard(125, 110, 105, 60, "BATT", String(vitals.battery), "%", COLOR_SAFE);
+
+  drawReadingCard(10, 178, 220, 38, "AI RISK", String(vitals.riskScore) + "%", "LOW", COLOR_SAFE);
 
   drawSoftButton("SOS", COLOR_DANGER);
   tft.setTextColor(COLOR_MUTED, COLOR_BG);
-  tft.drawCentreString("Monitoring active", SCREEN_W / 2, 254, 1);
+  tft.drawCentreString("Monitoring active", SCREEN_W / 2, 264, 1);
 }
 
 void DeviceUi::showWarning(const VitalSigns& vitals, uint8_t countdownSeconds) {
@@ -62,16 +65,34 @@ void DeviceUi::showEmergency(const VitalSigns& vitals) {
 
   drawCenteredText("SOS", 48, 4, COLOR_DANGER);
   tft.setTextColor(COLOR_TEXT, COLOR_BG);
-  tft.drawCentreString("Emergency detected", SCREEN_W / 2, 92, 2);
+  tft.drawCentreString("SOS Active", SCREEN_W / 2, 92, 2);
 
   tft.fillRoundRect(18, 120, 204, 84, 8, COLOR_PANEL);
   tft.drawRoundRect(18, 120, 204, 84, 8, COLOR_LINE);
   tft.setTextColor(COLOR_TEXT, COLOR_PANEL);
-  tft.drawString("OK Family notified", 30, 132, 2);
-  tft.drawString("OK Location shared", 30, 158, 2);
-  tft.drawString("OK Help requested", 30, 184, 2);
+  tft.drawString("Emergency: 115", 30, 132, 2);
+  tft.drawString("Help on the way", 30, 158, 2);
+  tft.drawString("HR:" + String(vitals.heartRate) + " BP:" + String(vitals.systolic) + "/" + String(vitals.diastolic), 30, 184, 1);
 
   drawSoftButton("I'M SAFE", COLOR_SAFE);
+}
+
+void DeviceUi::showSensorError(const VitalSigns& vitals) {
+  clearScreen();
+  drawHeader("SENSOR ERROR", COLOR_WARNING);
+
+  drawCenteredText("!", 56, 4, COLOR_WARNING);
+  tft.setTextColor(COLOR_TEXT, COLOR_BG);
+  tft.drawCentreString("Sensor quality low", SCREEN_W / 2, 110, 2);
+
+  int qualityPct = (int)(vitals.sensorQuality * 100.0f);
+  tft.setTextColor(COLOR_WARNING, COLOR_BG);
+  tft.drawCentreString("Quality: " + String(qualityPct) + "%", SCREEN_W / 2, 140, 2);
+
+  tft.setTextColor(COLOR_MUTED, COLOR_BG);
+  tft.drawCentreString("Check sensor connections", SCREEN_W / 2, 170, 1);
+
+  drawSoftButton("RETRY", COLOR_WARNING);
 }
 
 void DeviceUi::clearScreen() {

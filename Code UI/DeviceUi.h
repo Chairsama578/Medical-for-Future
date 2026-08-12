@@ -6,7 +6,8 @@
 enum class DeviceState {
   Safe,
   Warning,
-  Emergency
+  Emergency,
+  SensorError
 };
 
 struct VitalSigns {
@@ -14,7 +15,9 @@ struct VitalSigns {
   uint16_t systolic;
   uint16_t diastolic;
   uint8_t riskScore;
-  const char* movement;
+  uint8_t spo2;
+  uint8_t battery;
+  float sensorQuality;
 };
 
 class DeviceUi {
@@ -25,6 +28,7 @@ public:
   void showSafe(const VitalSigns& vitals);
   void showWarning(const VitalSigns& vitals, uint8_t countdownSeconds);
   void showEmergency(const VitalSigns& vitals);
+  void showSensorError(const VitalSigns& vitals);
 
 private:
   TFT_eSPI& tft;

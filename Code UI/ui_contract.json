@@ -5,43 +5,70 @@
     "height": 280,
     "interface": "SPI"
   },
-  "states": ["SAFE", "WARNING", "EMERGENCY"],
+  "api": {
+    "baseUrl": "http://192.168.x.x:8080",
+    "pollingIntervalMs": 500,
+    "endpoints": {
+      "health": "GET /health",
+      "sensor": "GET /sensor",
+      "device": "GET /device",
+      "sos": "POST /sos",
+      "symptoms": "POST /symptoms"
+    }
+  },
+  "states": ["Safe", "Warning", "Emergency", "SensorError"],
+  "stateMapping": {
+    "NORMAL": "Safe",
+    "WARNING": "Warning",
+    "CRITICAL": "Emergency",
+    "SENSOR_ERROR": "SensorError"
+  },
+  "fieldMapping": {
+    "heartRate": "sensor.heart_rate_bpm",
+    "systolic": "sensor.systolic_bp_mmhg",
+    "diastolic": "sensor.diastolic_bp_mmhg",
+    "spo2": "sensor.spo2_pct",
+    "battery": "sensor.battery_pct",
+    "riskScore": "decision.score",
+    "sensorQuality": "sensor.sensor_quality"
+  },
   "sampleVitals": {
     "safe": {
       "heartRate": 76,
-      "bloodPressure": {
-        "systolic": 118,
-        "diastolic": 76,
-        "unit": "mmHg"
-      },
-      "movement": "NORMAL",
+      "systolic": 118,
+      "diastolic": 76,
+      "spo2": 98,
+      "battery": 85,
+      "sensorQuality": 1.0,
       "riskScore": 14
     },
     "warning": {
       "heartRate": 118,
-      "bloodPressure": {
-        "systolic": 178,
-        "diastolic": 108,
-        "unit": "mmHg"
-      },
-      "movement": "UNSTABLE",
+      "systolic": 178,
+      "diastolic": 108,
+      "spo2": 93,
+      "battery": 60,
+      "sensorQuality": 0.85,
       "riskScore": 78,
       "countdownSeconds": 10
     },
     "emergency": {
       "heartRate": 54,
-      "bloodPressure": {
-        "systolic": 190,
-        "diastolic": 120,
-        "unit": "mmHg"
-      },
-      "movement": "LOW",
-      "riskScore": 94,
-      "mockService": {
-        "familyNotified": true,
-        "locationShared": true,
-        "helpRequested": true
-      }
+      "systolic": 190,
+      "diastolic": 120,
+      "spo2": 88,
+      "battery": 40,
+      "sensorQuality": 0.9,
+      "riskScore": 94
+    },
+    "sensorError": {
+      "heartRate": 0,
+      "systolic": 0,
+      "diastolic": 0,
+      "spo2": 0,
+      "battery": 50,
+      "sensorQuality": 0.3,
+      "riskScore": 0
     }
   }
 }
