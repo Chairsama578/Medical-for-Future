@@ -1,0 +1,577 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>StrokeGuard AI — Màn hình theo dõi</title>
+<style>
+  :root {
+    --bg: #0a0e1a;
+    --bg2: #0f1524;
+    --card: #131a2e;
+    --card-border: #1e2a45;
+    --txt: #e8ecf8;
+    --dim: #8b94ad;
+    --green: #2ecc71;
+    --yellow: #f1c40f;
+    --orange: #e67e22;
+    --red: #e74c3c;
+    --cyan: #4dd0e1;
+    --purple: #a78bfa;
+    --font: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  html, body {
+    height: 100%;
+    background: radial-gradient(1200px 800px at 20% -10%, #16203a 0%, var(--bg) 55%);
+    color: var(--txt);
+    font-family: var(--font);
+    overflow: hidden;
+    user-select: none;
+  }
+
+  .app {
+    display: grid;
+    grid-template-rows: 64px 1fr 56px;
+    height: 100vh;
+    padding: 16px 20px 12px;
+    gap: 12px;
+  }
+
+  /* ---------- HEADER ---------- */
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+  }
+
+  .brand { display: flex; align-items: center; gap: 14px; }
+  .logo {
+    width: 42px; height: 42px;
+    display: grid; place-items: center;
+    background: linear-gradient(135deg, var(--red), var(--purple));
+    border-radius: 12px;
+    font-size: 22px;
+    box-shadow: 0 4px 18px rgba(231,76,60,.35);
+  }
+  .brand h1 { font-size: 20px; font-weight: 700; letter-spacing: .5px; }
+  .brand small { display: block; color: var(--dim); font-size: 11px; font-weight: 400; letter-spacing: 1.2px; }
+
+  .header-right { display: flex; align-items: center; gap: 18px; }
+  .clock { text-align: right; }
+  .clock .time { font-size: 24px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .clock .date { font-size: 11px; color: var(--dim); }
+
+  .conn { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--dim); }
+  .conn .dot {
+    width: 10px; height: 10px; border-radius: 50%;
+    background: var(--red);
+    box-shadow: 0 0 0 0 rgba(231,76,60,.6);
+    animation: pulse 1.6s infinite;
+  }
+  .conn.online .dot { background: var(--green); box-shadow: 0 0 0 0 rgba(46,204,113,.6); }
+  @keyframes pulse {
+    0%   { box-shadow: 0 0 0 0 rgba(255,255,255,.25); }
+    70%  { box-shadow: 0 0 0 9px rgba(255,255,255,0); }
+    100% { box-shadow: 0 0 0 0 rgba(255,255,255,0); }
+  }
+
+  /* ---------- MAIN GRID ---------- */
+  main {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1.1fr;
+    grid-template-rows: 1fr 1fr;
+    gap: 14px;
+    min-height: 0;
+  }
+
+  .card {
+    background: linear-gradient(180deg, var(--card) 0%, var(--bg2) 100%);
+    border: 1px solid var(--card-border);
+    border-radius: 16px;
+    padding: 16px 18px;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    position: relative;
+    overflow: hidden;
+  }
+  .card::before {
+    content: '';
+    position: absolute; inset: 0 0 auto 0; height: 3px;
+    background: var(--card-border);
+    opacity: .5;
+  }
+
+  .card-label {
+    font-size: 11px; font-weight: 600; color: var(--dim);
+    letter-spacing: 1.5px; text-transform: uppercase;
+    display: flex; align-items: center; gap: 8px;
+    margin-bottom: 6px;
+  }
+  .card-label .ico { font-size: 15px; }
+
+  /* ---- Big vitals ---- */
+  .vital { text-align: center; display: flex; flex-direction: column; justify-content: center; flex: 1; }
+  .vital .value {
+    font-size: 74px; font-weight: 700; line-height: 1.05;
+    font-variant-numeric: tabular-nums;
+    text-shadow: 0 0 30px rgba(78,205,225,.25);
+  }
+  .vital .unit { font-size: 20px; color: var(--dim); font-weight: 400; margin-left: 4px; }
+  .vital .desc { font-size: 12px; color: var(--dim); margin-top: 6px; }
+  .vital .sub { font-size: 12px; margin-top: 2px; font-weight: 600; }
+
+  .hr-value { color: var(--cyan); }
+  .spo2-value { color: var(--green); }
+  .mot-value { color: var(--yellow); }
+
+  /* ---- Status banner ---- */
+  .status-card { grid-column: 1 / 3; }
+  .status-body { flex: 1; display: flex; flex-direction: column; justify-content: center; gap: 8px; }
+  .status-line { display: flex; align-items: center; gap: 16px; }
+  .status-badge {
+    font-size: 30px; font-weight: 800; letter-spacing: 2px;
+    padding: 10px 26px; border-radius: 14px;
+    text-transform: uppercase;
+  }
+  .badge-NORMAL    { background: rgba(46,204,113,.14); color: var(--green);   border: 1px solid rgba(46,204,113,.5); }
+  .badge-WARNING   { background: rgba(241,196,15,.14);  color: var(--yellow);  border: 1px solid rgba(241,196,15,.5); }
+  .badge-CRITICAL  { background: rgba(231,76,60,.16);   color: var(--red);     border: 1px solid rgba(231,76,60,.6);
+                     animation: blink 0.9s infinite; }
+  .badge-NO_SIGNAL { background: rgba(139,148,173,.12); color: var(--dim);     border: 1px solid rgba(139,148,173,.4); }
+
+  @keyframes blink { 50% { opacity: .45; } }
+
+  .status-msg { font-size: 16px; color: var(--txt); flex: 1; }
+  .status-msg .reasons { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+  .chip {
+    font-size: 12px; font-weight: 600;
+    padding: 5px 12px; border-radius: 999px;
+    background: rgba(255,255,255,.05);
+    border: 1px solid var(--card-border);
+  }
+  .chip.warn { background: rgba(241,196,15,.12); color: var(--yellow); border-color: rgba(241,196,15,.4); }
+  .chip.crit { background: rgba(231,76,60,.14);  color: var(--red);    border-color: rgba(231,76,60,.5); }
+  .chip.sig  { background: rgba(139,148,173,.1); color: var(--dim); }
+
+  .signal-bar { display: flex; align-items: center; gap: 10px; font-size: 12px; color: var(--dim); }
+  .signal-bar .meter { flex: 1; height: 6px; border-radius: 3px; background: #1b2440; overflow: hidden; }
+  .signal-bar .meter i { display: block; height: 100%; border-radius: 3px; background: var(--green); transition: width .6s, background .3s; }
+
+  /* ---- Charts ---- */
+  .chart-card { grid-column: 1 / 4; }
+  canvas { width: 100%; flex: 1; min-height: 0; display: block; }
+
+  /* ---- Alert log ---- */
+  .alerts-card { grid-column: 3; grid-row: 1 / 3; display: flex; flex-direction: column; }
+  .alerts-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; min-height: 0; }
+  .alerts-list::-webkit-scrollbar { width: 4px; }
+  .alerts-list::-webkit-scrollbar-thumb { background: #24304f; border-radius: 2px; }
+
+  .alert-item {
+    display: flex; align-items: center; gap: 10px;
+    padding: 9px 12px; border-radius: 10px;
+    background: rgba(255,255,255,.03);
+    border-left: 3px solid var(--dim);
+    font-size: 13px;
+    animation: slideIn .3s ease;
+  }
+  @keyframes slideIn { from { opacity: 0; transform: translateX(14px); } to { opacity: 1; transform: none; } }
+  .alert-item .lvl { font-weight: 800; font-size: 11px; letter-spacing: 1px; min-width: 74px; }
+  .alert-item .msg { flex: 1; color: var(--txt); }
+  .alert-item .at { font-size: 11px; color: var(--dim); font-variant-numeric: tabular-nums; }
+  .alert-item.a-NORMAL    { border-left-color: var(--green); }
+  .alert-item.a-WARNING   { border-left-color: var(--yellow); }
+  .alert-item.a-CRITICAL  { border-left-color: var(--red); background: rgba(231,76,60,.07); }
+  .alert-item.a-NO_SIGNAL { border-left-color: var(--dim); }
+  .a-WARNING .lvl { color: var(--yellow); }
+  .a-CRITICAL .lvl { color: var(--red); }
+  .a-NO_SIGNAL .lvl { color: var(--dim); }
+  .a-NORMAL .lvl { color: var(--green); }
+  .empty { color: var(--dim); font-size: 13px; text-align: center; padding: 20px 0; }
+
+  /* ---------- FOOTER ---------- */
+  footer {
+    display: flex; align-items: center; justify-content: space-between;
+    font-size: 11px; color: var(--dim);
+  }
+  footer .status-flag { display: flex; gap: 14px; align-items: center; }
+  footer .flag { display: flex; align-items: center; gap: 6px; }
+  footer .flag i { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+  .flag-ok i { background: var(--green); }
+  .flag-warn i { background: var(--yellow); }
+  .flag-off i { background: #3a4565; }
+
+  /* screen fit for 1080p */
+  @media (max-height: 800px) {
+    .vital .value { font-size: 54px; }
+    .status-badge { font-size: 24px; }
+    .card { padding: 12px 14px; }
+  }
+</style>
+</head>
+<body>
+<div class="app">
+
+  <!-- ============ HEADER ============ -->
+  <header>
+    <div class="brand">
+      <div class="logo">❤️</div>
+      <div>
+        <h1>StrokeGuard AI</h1>
+        <small>THEO DÕI ĐỘT QUỴ &nbsp;·&nbsp; EDGE INTELLIGENCE</small>
+      </div>
+    </div>
+    <div class="header-right">
+      <div class="conn" id="conn"><span class="dot"></span><span id="connTxt">Đang kết nối…</span></div>
+      <div class="clock">
+        <div class="time" id="clock">--:--:--</div>
+        <div class="date" id="date"></div>
+      </div>
+    </div>
+  </header>
+
+  <!-- ============ MAIN ============ -->
+  <main>
+
+    <!-- HR -->
+    <div class="card">
+      <div class="card-label"><span class="ico">💓</span> Nhịp tim</div>
+      <div class="vital">
+        <div class="value"><span class="hr-value" id="hrVal">--</span><span class="unit">BPM</span></div>
+        <div class="desc" id="hrSub">Chờ dữ liệu…</div>
+      </div>
+    </div>
+
+    <!-- SpO2 -->
+    <div class="card">
+      <div class="card-label"><span class="ico">🫁</span> Oxy máu SpO2</div>
+      <div class="vital">
+        <div class="value"><span class="spo2-value" id="spo2Val">--</span><span class="unit">%</span></div>
+        <div class="desc" id="spo2Sub">Chờ dữ liệu…</div>
+      </div>
+    </div>
+
+    <!-- Status -->
+    <div class="card status-card">
+      <div class="card-label"><span class="ico">🚨</span> Trạng thái cảnh báo</div>
+      <div class="status-body">
+        <div class="status-line">
+          <div class="status-badge" id="badge">—</div>
+          <div class="status-msg">
+            <div id="statusMsg">Đang khởi tạo hệ thống…</div>
+            <div class="reasons" id="reasons"></div>
+          </div>
+        </div>
+        <div class="signal-bar">
+          <span>Tín hiệu mạch:</span>
+          <div class="meter"><i id="sigMeter" style="width:0%"></i></div>
+          <span id="sigTxt">--</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Motion -->
+    <div class="card">
+      <div class="card-label"><span class="ico">📳</span> Chuyển động</div>
+      <div class="vital">
+        <div class="value"><span class="mot-value" id="motVal">--</span><span class="unit">g</span></div>
+        <div class="desc" id="motSub">Độ lệch so với trọng lực</div>
+      </div>
+    </div>
+
+    <!-- Alerts -->
+    <div class="card alerts-card">
+      <div class="card-label"><span class="ico">📋</span> Nhật ký cảnh báo</div>
+      <div class="alerts-list" id="alertsList"><div class="empty">Chưa có cảnh báo</div></div>
+    </div>
+
+    <!-- Charts -->
+    <div class="card chart-card">
+      <div class="card-label"><span class="ico">📈</span> Xu hướng 60 giây</div>
+      <canvas id="chart"></canvas>
+    </div>
+
+  </main>
+
+  <!-- ============ FOOTER ============ -->
+  <footer>
+    <div>StrokeGuard AI · Arduino UNO Q · MAX30102 + MPU6050</div>
+    <div class="status-flag">
+      <span class="flag flag-ok" id="fFinger"><i></i> Ngón tay</span>
+      <span class="flag flag-ok" id="fBridge"><i></i> Bridge</span>
+      <span class="flag flag-off" id="fApp"><i></i> App</span>
+      <span id="pktInfo">--</span>
+    </div>
+  </footer>
+
+</div>
+
+<script>
+'use strict';
+
+const $ = id => document.getElementById(id);
+const NORMAL='NORMAL', WARNING='WARNING', CRITICAL='CRITICAL', NOSIG='NO_SIGNAL';
+let lastState = null;
+let lastAlertCount = 0;
+let chartCtx, chartW, chartH;
+
+/* ---------------- clock ---------------- */
+function tickClock() {
+  const now = new Date();
+  const p = n => String(n).padStart(2, '0');
+  $('clock').textContent = `${p(now.getHours())}:${p(now.getMinutes())}:${p(now.getSeconds())}`;
+  $('date').textContent = now.toLocaleDateString('vi-VN', { weekday: 'long', day: '2-digit', month: '2-digit', year: 'numeric' });
+}
+setInterval(tickClock, 1000); tickClock();
+
+/* ---------------- helpers ---------------- */
+function fmtTime(ts) {
+  const d = new Date(ts * 1000);
+  return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}:${String(d.getSeconds()).padStart(2,'0')}`;
+}
+
+/* ---------------- data ---------------- */
+async function poll() {
+  try {
+    const res = await fetch('/api/state', { cache: 'no-store' });
+    if (!res.ok) throw new Error(res.status);
+    const st = await res.json();
+    lastState = st;
+    render(st);
+    setConn(true);
+  } catch (e) {
+    setConn(false);
+  }
+}
+
+function setConn(ok) {
+  const el = $('conn');
+  el.classList.toggle('online', ok);
+  $('connTxt').textContent = ok ? 'Trực tuyến' : 'Mất kết nối';
+}
+
+/* ---------------- render ---------------- */
+function render(st) {
+  const v = st.vitals || {};
+  const s = st.signal || {};
+  const sts = st.status || {};
+
+  // HR
+  if (v.hr > 0) {
+    $('hrVal').textContent = v.hr;
+    $('hrSub').textContent = (v.hr > 120 ? 'Nhịp tim nhanh!' : v.hr < 50 ? 'Nhịp tim chậm!' : 'Ổn định');
+  } else {
+    $('hrVal').textContent = '--';
+    $('hrSub').textContent = 'Không có tín hiệu';
+  }
+
+  // SpO2
+  if (v.spo2 > 0) {
+    $('spo2Val').textContent = v.spo2;
+    const stable = v.spo2_stable !== false; // default trusted
+    const sub = stable
+      ? (v.spo2 < 90 ? 'Nguy hiểm!' : v.spo2 < 94 ? 'Thấp' : 'Bình thường')
+      : 'Đang ổn định lại…';
+    $('spo2Sub').textContent = sub;
+    $('spo2Sub').style.opacity = stable ? 1 : 0.55;
+  } else {
+    $('spo2Val').textContent = '--';
+    $('spo2Sub').textContent = 'Không có tín hiệu';
+    $('spo2Sub').style.opacity = 1;
+  }
+
+  // SpO2 raw trend mini-bar under the card
+  const raw = (st.raw && st.raw.spo2_recent) || [];
+  drawSpo2Trend(raw);
+
+  // Motion
+  $('motVal').textContent = v.motion_dev != null ? v.motion_dev.toFixed(2) : '--';
+  $('motSub').textContent = (v.motion_dev || 0) > 4 ? 'Phát hiện va đập/chuyển động mạnh!' : 'Độ lệch so với trọng lực';
+
+  // Status badge
+  const level = sts.level || NORMAL;
+  $('badge').className = 'status-badge badge-' + level;
+  $('badge').textContent = level === NOSIG ? 'NO SIGNAL' : level;
+
+  const labels = { NORMAL:'Bình thường', WARNING:'Cảnh báo', CRITICAL:'NGUY KỊCH', NO_SIGNAL:'Mất tín hiệu' };
+  $('statusMsg').textContent = labels[level] || level;
+
+  // reasons chips
+  const rz = $('reasons');
+  rz.innerHTML = '';
+  (sts.reasons || []).forEach(r => {
+    const c = document.createElement('span');
+    c.className = 'chip ' + (level === CRITICAL ? 'crit' : level === WARNING ? 'warn' : 'sig');
+    c.textContent = r;
+    rz.appendChild(c);
+  });
+  if (level === NOSIG && !(sts.reasons||[]).length) {
+    const c = document.createElement('span');
+    c.className = 'chip sig';
+    c.textContent = 'Đặt ngón tay lên cảm biến MAX30102';
+    rz.appendChild(c);
+  }
+
+  // signal meter
+  const ratio = (s.valid_ratio || 0) * 100;
+  const meter = $('sigMeter');
+  meter.style.width = Math.max(4, ratio) + '%';
+  meter.style.background = ratio > 60 ? 'var(--green)' : ratio > 30 ? 'var(--yellow)' : 'var(--red)';
+  $('sigTxt').textContent = s.finger ? `Ngón tay OK · ${Math.round(ratio)}%` : 'Chưa đặt ngón tay';
+
+  // footer flags
+  setFlag('fFinger', !!(s.finger), s.finger ? 'Ngón tay' : 'Ngón tay');
+  setFlag('fBridge', true, 'Bridge');
+  setFlag('fApp', !!(st.count > 0), 'App');
+  $('pktInfo').textContent = `#${st.count || 0} gói`;
+
+  // alerts
+  renderAlerts(st.alerts || []);
+
+  // chart
+  drawChart(st.history || {});
+}
+
+function setFlag(id, ok, label) {
+  const el = $(id);
+  el.classList.toggle('flag-ok', ok);
+  el.classList.toggle('flag-warn', !ok);
+  el.classList.toggle('flag-off', false);
+  el.innerHTML = `<i></i> ${label}`;
+}
+
+function renderAlerts(alerts) {
+  const list = $('alertsList');
+  const items = alerts.slice().reverse();
+  if (!items.length) {
+    list.innerHTML = '<div class="empty">Chưa có cảnh báo</div>';
+    return;
+  }
+  list.innerHTML = '';
+  items.forEach(a => {
+    const div = document.createElement('div');
+    div.className = 'alert-item a-' + (a.level === NOSIG ? 'NO_SIGNAL' : a.level);
+    const lbl = a.level === NOSIG ? 'MẤT TÍN HIỆU' : a.level;
+    div.innerHTML = `<span class="lvl">${lbl}</span><span class="msg">${a.msg || ''}</span><span class="at">${fmtTime(a.ts)}</span>`;
+    list.appendChild(div);
+  });
+}
+
+/* ---------------- chart ---------------- */
+function initChart() {
+  const cv = $('chart');
+  chartCtx = cv.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  chartW = cv.clientWidth; chartH = cv.clientHeight;
+  cv.width = chartW * dpr; cv.height = chartH * dpr;
+  chartCtx.scale(dpr, dpr);
+}
+
+/* mini trend bar for SpO2 raw values */
+function drawSpo2Trend(vals) {
+  let bar = $('spo2Trend');
+  if (!bar) return;
+  bar.innerHTML = '';
+  if (!vals.length) { bar.textContent = ''; return; }
+  const mx = Math.max(...vals, 95), mn = Math.min(...vals, 70);
+  const span = mx - mn || 1;
+  vals.forEach(v => {
+    const dot = document.createElement('span');
+    dot.className = 'spotrend-dot';
+    const norm = (v - mn) / span;
+    dot.style.background = v < 90 ? '#e74c3c' : v < 94 ? '#f1c40f' : '#2ecc71';
+    dot.style.height = Math.max(4, 22 * norm + 4) + 'px';
+    dot.title = String(v);
+    bar.appendChild(dot);
+  });
+}
+
+function drawChart(h) {
+  if (!chartCtx) return;
+  const ctx = chartCtx, W = chartW, H = chartH;
+  ctx.clearRect(0, 0, W, H);
+  const maxPts = 60;
+  const series = [
+    { data: h.hr,    color: '#4dd0e1', label: 'HR' },
+    { data: h.spo2,  color: '#2ecc71', label: 'SpO2' },
+  ];
+
+  // grid
+  ctx.strokeStyle = 'rgba(255,255,255,.05)';
+  ctx.lineWidth = 1;
+  for (let i = 1; i < 4; i++) {
+    const y = H * i / 4;
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+  }
+
+  const padL = 34, padR = 8, padT = 8, padB = 16;
+  const iw = W - padL - padR, ih = H - padT - padB;
+
+  // Y scales
+  const maxVal = 110, minVal = 0;
+
+  function plot(data, color, fill) {
+    if (!data || data.length < 2) return;
+    const n = data.length;
+    const step = iw / (maxPts - 1);
+    ctx.beginPath();
+    data.forEach((v, i) => {
+      const x = padL + i * step;
+      const y = padT + ih - (Math.min(maxVal, Math.max(minVal, v)) - minVal) / (maxVal - minVal) * ih;
+      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    });
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2.5;
+    ctx.lineJoin = 'round';
+    ctx.stroke();
+    if (fill) {
+      ctx.lineTo(padL + (data.length-1)*step, padT + ih);
+      ctx.lineTo(padL, padT + ih);
+      ctx.closePath();
+      const g = ctx.createLinearGradient(0, padT, 0, padT + ih);
+      g.addColorStop(0, color + '33');
+      g.addColorStop(1, color + '00');
+      ctx.fillStyle = g;
+      ctx.fill();
+    }
+  }
+
+  plot(h.hr, '#4dd0e1', true);
+  plot(h.spo2, '#2ecc71', false);
+
+  // legend
+  ctx.font = '11px Segoe UI';
+  ctx.fillStyle = '#4dd0e1';
+  ctx.fillText('● HR (BPM)', padL + 4, padT + 10);
+  ctx.fillStyle = '#2ecc71';
+  ctx.fillText('● SpO2 (%)', padL + 90, padT + 10);
+
+  // y labels
+  ctx.fillStyle = '#8b94ad';
+  ctx.font = '10px Segoe UI';
+  ctx.fillText('110', 4, padT + 8);
+  ctx.fillText('55', 4, padT + ih/2 + 3);
+  ctx.fillText('0', 4, padT + ih - 4);
+
+  // x labels (time)
+  if (lastState) {
+    const now = new Date(lastState.ts * 1000);
+    const p = n => String(n).padStart(2,'0');
+    ctx.fillText(`−60s`, padL, H - 4);
+    ctx.fillText(`${p(now.getHours())}:${p(now.getMinutes())}:${p(now.getSeconds())}`, W - padR - 70, H - 4);
+  }
+}
+
+/* ---------------- boot ---------------- */
+window.addEventListener('resize', () => { initChart(); if (lastState) drawChart(lastState.history || {}); });
+initChart();
+poll();
+setInterval(poll, 1000);
+</script>
+</body>
+</html>

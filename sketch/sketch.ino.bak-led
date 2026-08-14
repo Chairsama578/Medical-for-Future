@@ -1,0 +1,1018 @@
+// ============================================================
+// StrokeGuard UNO Q
+// MPU6050 + MAX30102
+//
+// UNO Q:
+//   Wire SDA -> D20
+//   Wire SCL -> D21
+//
+// MPU6050:
+//   VCC -> 3.3V
+//   GND -> GND
+//   SDA -> D20
+//   SCL -> D21
+//
+// MAX30102:
+//   VIN -> 3.3V
+//   GND -> GND
+//   SDA -> D20
+//   SCL -> D21
+//   INT -> khong can
+//
+// Libraries:
+//   Adafruit MPU6050
+//   Adafruit BusIO
+//   Adafruit Unified Sensor
+//   SparkFun MAX3010x Pulse and Proximity Sensor Library
+// ============================================================
+
+#include <Arduino.h>
+#include <Wire.h>
+#include "Arduino_RouterBridge.h"
+
+#include <Adafruit_MPU6050.h>
+#include <Adafruit_Sensor.h>
+
+#include "MAX30105.h"
+
+
+// ============================================================
+// CONFIG
+// ============================================================
+
+#define SIM_MODE false
+
+// MAX30102 sampling
+#define SAMPLE_RATE 100
+#define BUFFER_SIZE 100
+
+// Finger detection
+#define MIN_IR_VALUE 10000
+
+
+// ============================================================
+// SENSOR OBJECTS
+// ============================================================
+
+Adafruit_MPU6050 mpu;
+MAX30105 max30102;
+
+
+// ============================================================
+// SENSOR DATA
+// ============================================================
+
+struct SensorData
+{
+  uint32_t ir;
+  uint32_t red;
+
+  float ax;
+  float ay;
+  float az;
+
+  float gx;
+  float gy;
+  float gz;
+
+  float roll;
+  float pitch;
+
+  float bpm;
+  float spo2;
+
+  bool bpmValid;
+  bool spo2Valid;
+};
+
+SensorData data;
+
+
+// ============================================================
+// MAX30102 BUFFER
+// ============================================================
+
+uint32_t irBuffer[BUFFER_SIZE];
+uint32_t redBuffer[BUFFER_SIZE];
+
+int bufferIndex = 0;
+
+
+// ============================================================
+// MPU6050 STATUS
+// ============================================================
+
+bool mpuOK = false;
+bool maxOK = false;
+
+
+// ============================================================
+// TIMERS
+// ============================================================
+
+unsigned long lastMPURead = 0;
+unsigned long lastPrint = 0;
+
+
+// ============================================================
+// SIMPLE SPO2 CALCULATION
+//
+// Đây là thuật toán ước tính cho prototype.
+// Không phải thuật toán y tế/chẩn đoán.
+// ============================================================
+
+float calculateSpO2(
+  uint32_t *ir,
+  uint32_t *red,
+  int length,
+  bool &valid
+)
+{
+  valid = false;
+
+  if (length < 50)
+    return 0;
+
+
+  // ----------------------------------------------------------
+  // Calculate DC component
+  // ----------------------------------------------------------
+
+  double irMean = 0;
+  double redMean = 0;
+
+  for (int i = 0; i < length; i++)
+  {
+    irMean += ir[i];
+    redMean += red[i];
+  }
+
+  irMean /= length;
+  redMean /= length;
+
+
+  if (irMean < MIN_IR_VALUE)
+    return 0;
+
+
+  // ----------------------------------------------------------
+  // Calculate AC RMS
+  // ----------------------------------------------------------
+
+  double irAC = 0;
+  double redAC = 0;
+
+  for (int i = 0; i < length; i++)
+  {
+    double irDiff = ir[i] - irMean;
+    double redDiff = red[i] - redMean;
+
+    irAC += irDiff * irDiff;
+    redAC += redDiff * redDiff;
+  }
+
+  irAC = sqrt(irAC / length);
+  redAC = sqrt(redAC / length);
+
+
+  if (irAC <= 0 || redAC <= 0)
+    return 0;
+
+
+  // ----------------------------------------------------------
+  // Ratio of ratios
+  // ----------------------------------------------------------
+
+  double ratio =
+    (redAC / redMean) /
+    (irAC / irMean);
+
+
+  // ----------------------------------------------------------
+  // Approximate SpO2 equation
+  // ----------------------------------------------------------
+
+  float spo2 = 110.0 - (25.0 * ratio);
+
+
+  // ----------------------------------------------------------
+  // Safety range for prototype
+  // ----------------------------------------------------------
+
+  if (spo2 > 100)
+    spo2 = 100;
+
+  if (spo2 < 70)
+    spo2 = 70;
+
+
+  valid = true;
+
+  return spo2;
+}
+
+
+// ============================================================
+// SIMPLE BPM CALCULATION
+//
+// Detect local peaks in IR signal.
+// ============================================================
+
+float calculateBPM(
+  uint32_t *ir,
+  int length,
+  bool &valid
+)
+{
+  valid = false;
+
+  if (length < 50)
+    return 0;
+
+
+  // ----------------------------------------------------------
+  // Calculate average
+  // ----------------------------------------------------------
+
+  double mean = 0;
+
+  for (int i = 0; i < length; i++)
+    mean += ir[i];
+
+  mean /= length;
+
+
+  if (mean < MIN_IR_VALUE)
+    return 0;
+
+
+  // ----------------------------------------------------------
+  // Find min / max
+  // ----------------------------------------------------------
+
+  uint32_t minValue = ir[0];
+  uint32_t maxValue = ir[0];
+
+  for (int i = 1; i < length; i++)
+  {
+    if (ir[i] < minValue)
+      minValue = ir[i];
+
+    if (ir[i] > maxValue)
+      maxValue = ir[i];
+  }
+
+
+  // Signal too weak
+  if ((maxValue - minValue) < 500)
+    return 0;
+
+
+  // ----------------------------------------------------------
+  // Dynamic threshold
+  // ----------------------------------------------------------
+
+  double threshold =
+    mean + (maxValue - mean) * 0.30;
+
+
+  // ----------------------------------------------------------
+  // Detect peaks
+  // ----------------------------------------------------------
+
+  int peaks[10];
+  int peakCount = 0;
+
+  // At 100 Hz:
+  // 30 samples = 300 ms
+  // This prevents detecting multiple peaks
+  // within one heartbeat.
+
+  int minPeakDistance = 30;
+
+  for (int i = 2; i < length - 2; i++)
+  {
+    bool isPeak =
+      ir[i] > ir[i - 1] &&
+      ir[i] >= ir[i + 1] &&
+      ir[i] > ir[i - 2] &&
+      ir[i] >= ir[i + 2] &&
+      ir[i] > threshold;
+
+
+    if (!isPeak)
+      continue;
+
+
+    // --------------------------------------------------------
+    // Make sure peak is sufficiently far from previous peak
+    // --------------------------------------------------------
+
+    if (peakCount > 0)
+    {
+      int distance =
+        i - peaks[peakCount - 1];
+
+      if (distance < minPeakDistance)
+      {
+        // Keep the higher peak
+        if (ir[i] > ir[peaks[peakCount - 1]])
+          peaks[peakCount - 1] = i;
+
+        continue;
+      }
+    }
+
+
+    if (peakCount < 10)
+    {
+      peaks[peakCount] = i;
+      peakCount++;
+    }
+  }
+
+
+  // Need at least two peaks
+  if (peakCount < 2)
+    return 0;
+
+
+  // ----------------------------------------------------------
+  // Calculate average interval
+  // ----------------------------------------------------------
+
+  double averageDistance = 0;
+
+  int intervals = 0;
+
+  for (int i = 1; i < peakCount; i++)
+  {
+    int distance =
+      peaks[i] - peaks[i - 1];
+
+    // 100 samples/sec
+    // 20 samples = 200 ms = 300 BPM
+    // 300 samples = 3 sec = 20 BPM
+
+    if (distance >= 20 && distance <= 300)
+    {
+      averageDistance += distance;
+      intervals++;
+    }
+  }
+
+
+  if (intervals == 0)
+    return 0;
+
+
+  averageDistance /= intervals;
+
+
+  // ----------------------------------------------------------
+  // BPM
+  // ----------------------------------------------------------
+
+  float bpm =
+    (60.0 * SAMPLE_RATE) /
+    averageDistance;
+
+
+  if (bpm < 30 || bpm > 220)
+    return 0;
+
+
+  valid = true;
+
+  return bpm;
+}
+
+
+// ============================================================
+// READ MPU6050
+// ============================================================
+
+void readMPU()
+{
+  if (!mpuOK)
+    return;
+
+
+  sensors_event_t accel;
+  sensors_event_t gyro;
+  sensors_event_t temperature;
+
+
+  mpu.getEvent(
+    &accel,
+    &gyro,
+    &temperature
+  );
+
+
+  // ----------------------------------------------------------
+  // Accelerometer
+  // Unit: m/s²
+  // ----------------------------------------------------------
+
+  data.ax = accel.acceleration.x;
+  data.ay = accel.acceleration.y;
+  data.az = accel.acceleration.z;
+
+
+  // ----------------------------------------------------------
+  // Gyroscope
+  // Unit: rad/s
+  // ----------------------------------------------------------
+
+  data.gx = gyro.gyro.x;
+  data.gy = gyro.gyro.y;
+  data.gz = gyro.gyro.z;
+
+
+  // ----------------------------------------------------------
+  // Calculate tilt angles from accelerometer
+  // ----------------------------------------------------------
+
+  data.roll =
+    atan2(
+      data.ay,
+      data.az
+    ) * 180.0 / PI;
+
+
+  data.pitch =
+    atan2(
+      -data.ax,
+      sqrt(
+        data.ay * data.ay +
+        data.az * data.az
+      )
+    ) * 180.0 / PI;
+}
+
+
+// ============================================================
+// READ MAX30102
+// ============================================================
+
+bool readMAXSample(
+  uint32_t &ir,
+  uint32_t &red
+)
+{
+  if (!maxOK)
+    return false;
+
+
+  // Wait for new sensor data
+
+  while (max30102.available() == 0)
+  {
+    max30102.check();
+
+    delay(1);
+  }
+
+
+  ir =
+    max30102.getIR();
+
+  red =
+    max30102.getRed();
+
+
+  max30102.nextSample();
+
+
+  return true;
+}
+
+
+// ============================================================
+// INITIALIZE MPU6050
+// ============================================================
+
+void initMPU()
+{
+  Serial.println();
+  Serial.println("[MPU6050] Initializing...");
+
+
+  if (!mpu.begin(0x68, &Wire))
+  {
+    Serial.println(
+      "[ERROR] MPU6050 not found!"
+    );
+
+    mpuOK = false;
+
+    return;
+  }
+
+
+  mpuOK = true;
+
+
+  // Accelerometer ±8G
+  mpu.setAccelerometerRange(
+    MPU6050_RANGE_8_G
+  );
+
+
+  // Gyroscope ±500 deg/s
+  mpu.setGyroRange(
+    MPU6050_RANGE_500_DEG
+  );
+
+
+  // Digital filter
+  mpu.setFilterBandwidth(
+    MPU6050_BAND_21_HZ
+  );
+
+
+  Serial.println(
+    "[OK] MPU6050 detected."
+  );
+}
+
+
+// ============================================================
+// INITIALIZE MAX30102
+// ============================================================
+
+void initMAX30102()
+{
+  Serial.println();
+  Serial.println("[MAX30102] Initializing...");
+
+
+  if (!max30102.begin(
+        Wire,
+        I2C_SPEED_FAST
+      ))
+  {
+    Serial.println(
+      "[ERROR] MAX30102 not found!"
+    );
+
+    maxOK = false;
+
+    return;
+  }
+
+
+  maxOK = true;
+
+
+  // ----------------------------------------------------------
+  // Configuration
+  //
+  // brightness = 60
+  // average = 4
+  // LED mode = 2 (RED + IR)
+  // sample rate = 100 Hz
+  // pulse width = 411
+  // ADC range = 4096
+  // ----------------------------------------------------------
+
+  max30102.setup(
+    60,
+    4,
+    2,
+    100,
+    411,
+    4096
+  );
+
+
+  // Red LED
+  max30102.setPulseAmplitudeRed(
+    0x0A
+  );
+
+
+  // IR LED
+  max30102.setPulseAmplitudeIR(
+    0x0A
+  );
+
+
+  // MAX30102 does not have green LED
+  max30102.setPulseAmplitudeGreen(
+    0
+  );
+
+
+  Serial.println(
+    "[OK] MAX30102 detected."
+  );
+}
+
+
+// ============================================================
+// PRINT SENSOR DATA
+// ============================================================
+
+void printData()
+{
+  Serial.println(
+    "------------------------------------------------"
+  );
+
+
+  Serial.print("IR: ");
+  Serial.print(data.ir);
+
+  Serial.print(" | RED: ");
+  Serial.print(data.red);
+
+
+  Serial.print(" | BPM: ");
+
+  if (data.bpmValid)
+    Serial.print(data.bpm, 1);
+  else
+    Serial.print("--");
+
+
+  Serial.print(" | SpO2: ");
+
+  if (data.spo2Valid)
+  {
+    Serial.print(data.spo2, 1);
+    Serial.print("%");
+  }
+  else
+  {
+    Serial.print("--");
+  }
+
+
+  Serial.println();
+
+
+  Serial.print("ACC  X=");
+  Serial.print(data.ax, 2);
+
+  Serial.print(" Y=");
+  Serial.print(data.ay, 2);
+
+  Serial.print(" Z=");
+  Serial.print(data.az, 2);
+
+
+  Serial.println();
+
+
+  Serial.print("GYRO X=");
+  Serial.print(data.gx, 2);
+
+  Serial.print(" Y=");
+  Serial.print(data.gy, 2);
+
+  Serial.print(" Z=");
+  Serial.print(data.gz, 2);
+
+
+  Serial.println();
+
+
+  Serial.print("ANGLE Roll=");
+  Serial.print(data.roll, 1);
+
+  Serial.print(" deg | Pitch=");
+  Serial.print(data.pitch, 1);
+
+  Serial.println(" deg");
+
+
+  Serial.println(
+    "------------------------------------------------"
+  );
+}
+
+
+// ============================================================
+// PRINT CSV
+//
+// Format:
+//
+// timestamp,
+// IR,
+// RED,
+// BPM,
+// SpO2,
+// AX,
+// AY,
+// AZ,
+// GX,
+// GY,
+// GZ,
+// ROLL,
+// PITCH
+// ============================================================
+
+void printCSV()
+{
+    String csv;
+
+    csv += String(millis());
+    csv += ",";
+    csv += String(data.ir);
+    csv += ",";
+    csv += String(data.red);
+    csv += ",";
+    csv += String(data.bpmValid ? data.bpm : 0.0, 2);
+    csv += ",";
+    csv += String(data.spo2Valid ? data.spo2 : 0.0, 2);
+    csv += ",";
+    csv += String(data.ax, 3);
+    csv += ",";
+    csv += String(data.ay, 3);
+    csv += ",";
+    csv += String(data.az, 3);
+    csv += ",";
+    csv += String(data.gx, 3);
+    csv += ",";
+    csv += String(data.gy, 3);
+    csv += ",";
+    csv += String(data.gz, 3);
+    csv += ",";
+    csv += String(data.roll, 2);
+    csv += ",";
+    csv += String(data.pitch, 2);
+
+    Serial.println(csv);
+
+    Bridge.notify("sensor_data", csv.c_str());
+}
+
+// ============================================================
+// SETUP
+// ============================================================
+
+void setup()
+{
+  Serial.begin(115200);
+
+    Bridge.begin();
+
+
+  delay(1500);
+
+
+  Serial.println();
+  Serial.println();
+  Serial.println(
+    "=============================================="
+  );
+
+  Serial.println(
+    "        StrokeGuard UNO Q"
+  );
+
+  Serial.println(
+    "        MPU6050 + MAX30102"
+  );
+
+  Serial.println(
+    "=============================================="
+  );
+
+
+  // ----------------------------------------------------------
+  // UNO Q standard Arduino I2C
+  //
+  // SDA = D20
+  // SCL = D21
+  // ----------------------------------------------------------
+
+  Wire.begin();
+
+
+  // Fast I2C
+  Wire.setClock(400000);
+
+
+  // ----------------------------------------------------------
+  // Initialize sensors
+  // ----------------------------------------------------------
+
+  initMPU();
+
+  delay(100);
+
+  initMAX30102();
+
+
+  // ----------------------------------------------------------
+  // Initial values
+  // ----------------------------------------------------------
+
+  data.ir = 0;
+  data.red = 0;
+
+  data.ax = 0;
+  data.ay = 0;
+  data.az = 0;
+
+  data.gx = 0;
+  data.gy = 0;
+  data.gz = 0;
+
+  data.roll = 0;
+  data.pitch = 0;
+
+  data.bpm = 0;
+  data.spo2 = 0;
+
+  data.bpmValid = false;
+  data.spo2Valid = false;
+
+
+  Serial.println();
+  Serial.println(
+    "[SYSTEM] Sensor initialization finished."
+  );
+
+  Serial.println();
+
+  Serial.println(
+    "Put your finger gently on MAX30102."
+  );
+
+  Serial.println(
+    "Keep your finger still."
+  );
+
+  Serial.println();
+}
+
+
+// ============================================================
+// LOOP
+// ============================================================
+
+void loop()
+{
+  // ==========================================================
+  // SIMULATION MODE
+  // ==========================================================
+
+  if (SIM_MODE)
+  {
+    static unsigned long counter = 0;
+
+    counter++;
+
+
+    data.ir =
+      50000 +
+      (sin(counter * 0.1) * 10000);
+
+
+    data.red =
+      45000 +
+      (sin(counter * 0.1) * 8000);
+
+
+    data.ax =
+      sin(counter * 0.02) * 9.8;
+
+    data.ay =
+      cos(counter * 0.02) * 9.8;
+
+    data.az =
+      9.8;
+
+
+    data.gx = 0;
+    data.gy = 0;
+    data.gz = 0;
+
+
+    data.roll = 0;
+    data.pitch = 0;
+
+
+    data.bpm = 72;
+    data.spo2 = 98;
+
+    data.bpmValid = true;
+    data.spo2Valid = true;
+
+
+    if (millis() - lastPrint > 1000)
+    {
+      lastPrint = millis();
+
+      printData();
+      printCSV();
+    }
+
+
+    delay(10);
+
+    return;
+  }
+
+
+  // ==========================================================
+  // REAL SENSOR MODE
+  // ==========================================================
+
+
+  // ----------------------------------------------------------
+  // Read one MAX30102 sample
+  // ----------------------------------------------------------
+
+  if (maxOK)
+  {
+    uint32_t ir;
+    uint32_t red;
+
+
+    if (readMAXSample(ir, red))
+    {
+      data.ir = ir;
+      data.red = red;
+
+
+      // Store into buffer
+
+      irBuffer[bufferIndex] = ir;
+      redBuffer[bufferIndex] = red;
+
+      bufferIndex++;
+
+
+      // ------------------------------------------------------
+      // Once buffer is full
+      // ------------------------------------------------------
+
+      if (bufferIndex >= BUFFER_SIZE)
+      {
+        bufferIndex = 0;
+
+
+        // Calculate BPM
+
+        data.bpm =
+          calculateBPM(
+            irBuffer,
+            BUFFER_SIZE,
+            data.bpmValid
+          );
+
+
+        // Calculate SpO2
+
+        data.spo2 =
+          calculateSpO2(
+            irBuffer,
+            redBuffer,
+            BUFFER_SIZE,
+            data.spo2Valid
+          );
+      }
+    }
+  }
+
+
+  // ==========================================================
+  // MPU6050
+  //
+  // Read at approximately 25 Hz
+  // ==========================================================
+
+  if (
+    mpuOK &&
+    millis() - lastMPURead >= 40
+  )
+  {
+    lastMPURead = millis();
+
+    readMPU();
+  }
+
+
+  // ==========================================================
+  // OUTPUT
+  //
+  // Print once per second
+  // ==========================================================
+
+  if (
+    millis() - lastPrint >= 1000
+  )
+  {
+    lastPrint = millis();
+
+    printData();
+
+    // CSV for AI / Linux
+    printCSV();
+  }
+}

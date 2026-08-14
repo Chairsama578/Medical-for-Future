@@ -1,0 +1,10 @@
+{
+  "enabled": true,
+  "broker": "your-broker.example.com",
+  "port": 8883,
+  "username": "REPLACE_WITH_USERNAME",
+  "password": "REPLACE_WITH_PASSWORD",
+  "topic": "strokeguard/#",
+  "client_id": "unoq-strokeguard",
+  "tls": true
+}

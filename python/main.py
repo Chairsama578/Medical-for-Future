@@ -1,0 +1,939 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+StrokeGuard AI - MQTT-Cloud-only alert engine with ML + LLM analysis
+====================================================================
+KIẾN TRÚC (ML/LLM trung tâm — hardcode chỉ làm feature cho suy đoán):
+  ESP32 sensor node (MAX30102 + MPU6050) chạy RIÊNG, publish JSON lên
+  HiveMQ Cloud 5 Hz. UNO Q KHÔNG đọc sensor local (bỏ Bridge), chỉ:
+  subscribe MQTT -> chuẩn hóa payload -> ML suy đoán (RandomForest 150
+  cây) + rule vật lý (feature) -> LLM (Qwen3.5-0.8B) phán đoán cuối
+  -> state.json cho dashboard. Dashboard sạch: HR/SpO2/tình trạng theo
+  suy đoán ML/LLM, KHÔNG log Pkt ào ào kiểu serial.
+
+Payload ESP32 (13 fields, 5 Hz):
+  {"device":"esp32-strokeguard-01","ax":..,"ay":..,"az":..,
+   "gx":..,"gy":..,"gz":..,"ir":..,"red":..,"hr":..,"spo2":..,
+   "finger":bool,"ts":..}
+  - ax/ay/az: m/s^2 (đã chia 16384*g); gx/gy/gz: deg/s (đã chia 131)
+  - ir/red: raw ADC MAX30102; hr/spo2: tính trên ESP32 (finger=no -> bỏ)
+  Parser mqtt_client.py chuẩn hóa mọi payload cũ/mới -> dict.
+
+Rule engine (feature cho ML/LLM — không tự quyết định độc lập):
+  - signal_ok = data MQTT fresh + ir/red > ngưỡng nhiễu + finger hợp lệ
+  - Ngã = va đập (magdev > MAG_DEV_FALL & > baseline*IMPACT_MULT)
+          + tư thế lật (tilt từ accel) -> CRITICAL
+  - Gyro (°/s): lật/xoay nhanh (gravity không đổi khi xoay nên mag_dev
+    ~0, impact không bắt được) — chỉ báo khi nghiêng RÕ > 40°
+  - Lật > 55° giữ yên -> WARNING (lying, không cần va đập trước)
+  - HR/SpO2 rules (BIDMC): HR>130 / SpO2<90 = CRITICAL (không hạ cấp)
+  - Mất data MQTT > NO_SIGNAL_SEC -> NO_SIGNAL (watchdog thread)
+
+ML fallback (ml_fallback.py — LLM chết/không trả lời):
+  - RandomForest 150 cây P(fall) (UMA-FALL, AUC 0.756) + luật vật lý
+  - Phân biệt: fall | flip (lật nhanh) | lying | adl
+  - stroke_fall: ngã/nằm + HR>=130 hoặc SpO2<90 = NGHI TÉ NGÃ DO ĐỘT QUỴ
+  - Dashboard KHÔNG bao giờ trống
+
+LLM (advisory, thread riêng, cooldown 20s):
+  - _BoundedLLM: max_tokens=96, timeout=60, model llamacpp:Qwen3.5-0.8B-Q4_0
+  - clear_memory() trước mỗi lần chat; _llm_http_chat user-only (bỏ brick)
+  - Prompt nhận ML hint (ML=class/prob) -> LLM phán đoán cuối cùng
+"""
+import time
+import json
+import os
+import re as _re
+import threading
+from collections import deque
+from math import atan2
+import ml_fallback as _mlfb   # ML fallback khi LLM không trả lời/chết (UMA-FALL + BIDMC)
+
+try:
+    import numpy as np
+except ImportError:  # graceful fallback (median via statistics)
+    import statistics
+
+    def _median(vals):
+        return statistics.median(vals) if vals else 0.0
+
+    np = None
+
+from arduino.app_utils import App, Bridge, Frame
+
+try:
+    from arduino.app_bricks.llm import LargeLanguageModel
+except Exception as _e:
+    print(f"[LLM-IMPORT-FAIL] {_e}", flush=True)
+    LargeLanguageModel = None
+
+
+# ---- LLM brick: cap max_tokens so a 0.8B Q4 on UNO-Q answers in seconds ----
+class _BoundedLLM:
+    def __init__(self, **kw):
+        kw.setdefault("max_tokens", 512)
+        kw.setdefault("timeout", 240)
+        self._inner = LargeLanguageModel(**kw)
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    def chat(self, prompt):
+        # force max_tokens even if the brick's chat() ignores it
+        try:
+            return self._inner.chat(prompt, max_tokens=192)
+        except TypeError:
+            return self._inner.chat(prompt)
+
+
+_LLM = None
+_LLM_LAST_TRY = 0.0
+
+
+def _llm_log(msg):
+    """Ghi sự kiện LLM ra file — log container bị Pkt spam tràn buffer 100
+    dòng nên không bao giờ thấy được LLM-*; file này đọc qua docker exec."""
+    try:
+        with open("/app/.cache/llm.log", "a", encoding="utf-8") as _f:
+            _f.write(f"{time.strftime('%H:%M:%S')} {msg}\n")
+    except Exception:
+        pass
+
+
+def _ensure_llm():
+    """Retry LLM init — runner có thể CHƯA sẵn sàng lúc app start (recover/deploy
+    rm custom runner trước khi app-cli start -> init fail im lặng -> _LLM=None
+    vĩnh viễn -> LLM không bao giờ fire). Retry tối đa 1 lần/60s."""
+    global _LLM, _LLM_LAST_TRY
+    if _LLM is not None:
+        return True
+    if time.time() - _LLM_LAST_TRY < 60:
+        return False
+    _LLM_LAST_TRY = time.time()
+    try:
+        _LLM = _BoundedLLM(model="llamacpp:Qwen3.5-0.8B-Q4_0")
+        print("[LLM-INIT-OK] brick ready (retry)", flush=True)
+        return True
+    except Exception as _e:
+        print(f"[LLM-INIT-FAIL] {_e} -- retry sau 60s", flush=True)
+        _LLM = None
+        return False
+
+
+if LargeLanguageModel is not None:
+    try:
+        _LLM = _BoundedLLM(model="llamacpp:Qwen3.5-0.8B-Q4_0")
+        print("[LLM-INIT-OK] brick ready", flush=True)
+    except Exception as _e:
+        print(f"[LLM-INIT-FAIL] {_e} -- continuing with hardcode fallback",
+              flush=True)
+        _LLM = None
+
+
+# ---------------------------------------------------------------------------
+# CONFIG (tunable)
+# ---------------------------------------------------------------------------
+CFG = {
+    # ---- Signal validation (ESP32 raw ADC scale: ~300 khi có ngón tay) ----
+    "MIN_IR_FINGER": 50,         # ir/red raw dưới mức này => nhiễu/không ngón
+    "MIN_VALID_RATIO": 0.6,      # >=60% samples hợp lệ trong window => signal ok
+    "WINDOW": 15,                # sliding window (samples @5Hz = ~3s)
+
+    # ---- Physiological thresholds (chỉ dùng khi ESP32 gửi bpm/spo2 thật) ----
+    # Chuẩn theo ground truth BIDMC (dataset): HR>130 / SpO2<90 = CRITICAL
+    "HR_LOW": 50,
+    "HR_HIGH": 120,
+    "HR_VERY_HIGH": 130,
+    "SPO2_WARN": 94,
+    "SPO2_CRIT": 90,
+    "SPO2_STABLE_SPREAD": 8,
+
+    # ---- Motion / fall (accel m/s^2) ----
+    "G": 9.8,                    # gravity reference m/s^2
+    "MAG_DEV_FALL": 4.0,         # |mag - g| m/s^2 vượt => va đập/chuyển động mạnh
+    "TILT_FALL_DEG": 55.0,       # tilt vượt => nằm/lật
+    "IMPACT_MULT": 2.5,          # impact = baseline magdev * multiplier
+    "IMPACT_WINDOW": 8.0,        # giây tilt được tính sau va đập
+
+    # ---- Alert state machine ----
+    "ESCALATE_SAMPLES": 5,       # mẫu xấu liên tiếp để escalate
+    "RECOVER_SAMPLES": 10,       # mẫu tốt liên tiếp để downgrade
+    "NO_SIGNAL_SEC": 8,          # không có data MQTT lâu vậy => NO_SIGNAL
+    "STATE_FILE": "/app/.cache/state.json",
+    "LLM_COOLDOWN_S": 20,        # tối thiểu giây giữa 2 lần LLM phân tích
+}
+
+
+def _median(vals):
+    if not vals:
+        return 0.0
+    if np is not None:
+        return float(np.median(vals))
+    return statistics.median(vals)
+
+
+_LEVELS = ("NORMAL", "WARNING", "CRITICAL")
+_RISKS = ("LOW", "MODERATE", "HIGH")
+
+
+# ---- LED matrix 8x13: icon theo trạng thái (0-7 brightness, 8 hàng x 13 cột) ----
+_MATRIX_FRAMES = {
+    "NORMAL": np.array([
+        [0,0,0,0,0,0,0,0,0,0,7,7,0],
+        [0,0,0,0,0,0,0,0,0,0,7,7,0],
+        [0,0,0,0,0,0,0,0,0,7,7,0,0],
+        [0,0,0,0,0,0,0,0,7,7,0,0,0],
+        [0,0,0,0,0,0,0,7,7,7,0,0,0],
+        [0,0,0,0,0,0,7,7,0,0,0,0,0],
+        [0,0,0,0,0,7,7,0,0,0,0,0,0],
+        [0,7,7,7,7,0,0,0,0,0,0,0,0],
+    ], dtype=np.uint8),
+    "WARNING": np.array([
+        [0,0,0,0,0,7,7,7,7,0,0,0,0],
+        [0,0,0,0,0,7,7,7,7,0,0,0,0],
+        [0,0,0,0,0,7,7,7,7,0,0,0,0],
+        [0,0,0,0,0,7,7,7,7,0,0,0,0],
+        [0,0,0,0,0,7,7,7,7,0,0,0,0],
+        [0,0,0,0,0,7,7,7,7,0,0,0,0],
+        [0,0,0,0,0,0,0,0,0,0,0,0,0],
+        [0,0,0,0,0,7,7,7,7,0,0,0,0],
+    ], dtype=np.uint8),
+    "CRITICAL": np.array([
+        [7,7,0,0,0,0,0,0,0,0,0,7,7],
+        [0,7,7,0,0,0,0,0,0,0,7,7,0],
+        [0,0,7,7,0,0,0,0,0,7,7,0,0],
+        [0,0,0,7,7,0,0,0,0,7,7,0,0],
+        [0,0,0,0,7,7,0,0,7,7,0,0,0],
+        [0,0,0,0,0,7,7,0,7,7,0,0,0],
+        [0,0,0,0,0,0,7,7,0,0,0,0,0],
+        [0,0,0,0,0,0,7,7,0,0,0,0,0],
+    ], dtype=np.uint8),
+    "NO_SIGNAL": np.array([
+        [7,7,7,7,7,7,7,7,7,7,7,7,7],
+        [7,0,0,0,0,0,0,0,0,0,0,7,7],
+        [7,0,0,0,0,0,0,0,0,0,7,7,0],
+        [7,0,0,0,0,0,0,0,0,7,7,0,0],
+        [7,0,0,0,0,0,0,0,7,7,0,0,0],
+        [7,0,0,0,0,0,0,7,7,0,0,0,0],
+        [7,0,0,0,0,0,7,7,0,0,0,0,0],
+        [7,7,7,7,7,7,7,7,7,7,7,7,7],
+    ], dtype=np.uint8),
+}
+
+
+def _tilt_from_accel(ax, ay, az):
+    """roll/pitch (deg) ước lượng từ gia tốc (m/s^2) — giống ESP32 sketch."""
+    roll = 0.0
+    pitch = 0.0
+    try:
+        roll = atan2(ay, az) * 180.0 / 3.14159265
+        pitch = atan2(-ax, (ay * ay + az * az) ** 0.5) * 180.0 / 3.14159265
+    except Exception:
+        pass
+    return roll, pitch
+
+
+class StrokeGuard:
+    def __init__(self):
+        self.count = 0
+        self.ts = 0.0
+        self.device = "esp32-strokeguard-01"
+        self.raw = deque(maxlen=CFG["WINDOW"])   # (bpm, spo2, ir, mag_dev, roll, pitch)
+        self.tilt_win = deque(maxlen=5)          # roll/pitch nhanh (~1s @5Hz) — bắt lật tức thì
+        self.gyro_win = deque(maxlen=15)         # gyro_spike (°/s) — lật/xoay nhanh
+        self.valid = deque(maxlen=CFG["WINDOW"])
+        self.ir_buf = deque(maxlen=40)    # chuỗi IR cho PPG (8s @5Hz)
+        self.red_buf = deque(maxlen=40)   # chuỗi RED cho PPG
+        self.ts_buf = deque(maxlen=40)    # ts (ms ESP32) tương ứng
+        self.hr_hist = deque(maxlen=60)
+        self.spo2_hist = deque(maxlen=60)
+        self.motion_hist = deque(maxlen=60)
+        self.ratio_hist = deque(maxlen=60)
+        self.last_alert_ts = 0.0
+        self.alerts = deque(maxlen=20)
+        self.level = "NORMAL"
+        self.level_since = time.time()
+        self.bad_streak = 0
+        self.good_streak = 0
+        self.no_signal_since = None
+        self.magdev_baseline = deque(maxlen=10)
+        self.last_impact_ts = 0.0
+        self.last_llm_ts = 0.0
+        self._llm_busy = False
+        self._llm_busy_since = 0.0  # kẹt init/chat > 300s -> cho retry
+        self._llm_fails = 0
+        self._llm_fail_since = 0.0
+        self._llm_result = None   # {"ts":..., "level":..., "stroke_risk":..., "reason":...}
+        self._last_pkt_ts = 0.0   # epoch nhận packet MQTT gần nhất
+
+    # ------------------------------------------------------------------
+    # LLM worker (daemon thread -> never blocks the pipeline)
+    # ------------------------------------------------------------------
+    def _llm_http_chat(self, prompt, timeout=240):
+        """Chat trực tiếp llama-server (user-only — brick chat() gửi system role
+        làm model 0.8B mở CoT dài 'Analyze the Request' vô nghĩa; probe HTTP
+        user-only đã chứng minh CoT rỗng + format chuẩn)."""
+        import json as _json, urllib.request as _ur
+        body = _json.dumps({
+            "model": "Qwen3.5-0.8B-Q4_0",
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": 192, "temperature": 0.2, "seed": 42,
+        }).encode()
+        req = _ur.Request("http://llamacpp-models-runner:9999/v1/chat/completions",
+                          data=body, headers={"Content-Type": "application/json"})
+        with _ur.urlopen(req, timeout=timeout) as r:
+            data = _json.loads(r.read().decode())
+        return data["choices"][0]["message"]["content"]
+
+    def _llm_worker(self, prompt, magdev=0.0, roll=0.0, pitch=0.0, hr=0.0, spo2=0.0,
+                    gyro=0.0):
+        try:
+            resp = self._llm_http_chat(prompt)
+            if resp:
+                self._llm_result = self._parse_llm(resp)
+                if self._llm_result:
+                    self._llm_fails = 0
+                    print(f"[LLM-ANALYSIS] level={self._llm_result['level']} "
+                          f"stroke_risk={self._llm_result['stroke_risk']} "
+                          f"reason={self._llm_result['reason']}", flush=True)
+                    _llm_log(f"OK level={self._llm_result['level']} "
+                             f"risk={self._llm_result['stroke_risk']} "
+                             f"reason={self._llm_result['reason']}")
+                else:
+                    self._llm_fails += 1
+                    if self._llm_fails == 1:
+                        self._llm_fail_since = time.time()
+                    print(f"[LLM-PARSE-FAIL] {resp[:120]!r}", flush=True)
+                    _llm_log(f"PARSE_FAIL resp={resp[:150]!r}")
+                    self._ml_fallback(magdev, roll, pitch, hr, spo2, gyro)
+            else:
+                self._llm_fails += 1
+                if self._llm_fails == 1:
+                    self._llm_fail_since = time.time()
+                _llm_log("EMPTY_RESP")
+                self._ml_fallback(magdev, roll, pitch, hr, spo2)
+        except Exception as e:
+            self._llm_fails += 1
+            if self._llm_fails == 1:
+                self._llm_fail_since = time.time()
+            print(f"[LLM-ERR] {e}", flush=True)
+            _llm_log(f"ERR {e!r}")
+            self._ml_fallback(magdev, roll, pitch, hr, spo2)
+        finally:
+            self._llm_busy = False
+
+    def _ml_fallback(self, magdev, roll, pitch, hr, spo2, gyro=0.0):
+        """LLM không trả lời / chết -> ML fallback (dataset UMA-FALL + BIDMC):
+        RandomForest P(fall) + vitals rules. Dashboard KHÔNG bao giờ trống."""
+        try:
+            r = _mlfb.analyze(magdev, roll, pitch, hr, spo2, gyro)
+        except Exception as e:
+            print(f"[ML-FALLBACK-ERR] {e}", flush=True)
+            return
+        self._llm_result = {"ts": time.time(), "level": r["level"],
+                            "stroke_risk": r["risk"], "reason": r["reason"],
+                            "source": r["source"]}
+        # KHÔNG reset _llm_fails — LLM vẫn hỏng, giữ cooldown; chỉ reset
+        # khi LLM trả lời OK thật sự (nhánh success ở trên).
+        print(f"[ML-FALLBACK] level={r['level']} risk={r['risk']} "
+              f"reason={r['reason']} P={r['prob']}", flush=True)
+        _llm_log(f"ML_FALLBACK level={r['level']} risk={r['risk']} "
+                 f"reason={r['reason']}")
+
+    @staticmethod
+    def _parse_llm(resp):
+        if not resp:
+            return None
+        s = resp.replace(";", "|").replace(",", "|")
+        # Qwen3.5 (chatml) hay mở đầu bằng khối <think> CoT -> bỏ đi
+        if "<think>" in s.lower():
+            low = s.lower()
+            idx = low.rfind("</think>")
+            if idx != -1:
+                s = s[idx + len("</think>"):]
+            else:
+                for kw in ("CRITICAL", "WARNING", "NORMAL"):
+                    i = s.upper().rfind(kw)
+                    if i != -1:
+                        s = s[i:]
+                        break
+        # tolerate | ; , and "key=value" forms from small models
+        parts = [p.strip() for p in s.split("|")]
+
+        def clean(p):
+            p = p.strip()
+            if "=" in p:
+                p = p.split("=", 1)[1]
+            return p.strip(" :\t.").upper()
+
+        lvl = clean(parts[0]) if parts else ""
+        if lvl == "LOW":   # 0.8B model confuses level with risk -> map
+            lvl = "NORMAL"
+        if lvl not in _LEVELS:
+            found = None
+            for p in parts:
+                for sub in p.split("/"):
+                    c2 = clean(sub)
+                    if c2 == "LOW":
+                        c2 = "NORMAL"
+                    if c2 in _LEVELS:
+                        if found is None or _LEVELS.index(c2) > _LEVELS.index(found):
+                            found = c2
+            if found is None:
+                # fallback: "level=CRITICAL risk=HIGH reason=..." (space-separated, no pipes)
+                m = _re.search(r"level\s*[=:]\s*(CRITICAL|WARNING|NORMAL|LOW)", s, _re.I)
+                found = m.group(1).upper() if m else None
+                if found == "LOW":
+                    found = "NORMAL"
+            if found is None:
+                return None
+            lvl = found
+        rest = [p.strip() for p in parts[1:] if p.strip()]
+        rest = [p for p in rest if lvl not in p.upper()]
+        risk = clean(rest[0]) if rest else ("MODERATE" if lvl != "NORMAL" else "LOW")
+        if risk not in _RISKS:
+            risk = "MODERATE" if lvl != "NORMAL" else "LOW"
+        reason_parts = []
+        for p in rest[1:]:
+            p2 = p.strip()
+            if p2.lower().startswith("reason"):
+                p2 = p2[6:].strip(" :")
+            reason_parts.append(p2)
+        reason = " ".join(reason_parts) if reason_parts else (rest[0] if rest else lvl)
+        reason = reason[:100] or lvl
+        return {"ts": time.time(), "level": lvl, "stroke_risk": risk, "reason": reason}
+
+    def _trigger_llm(self, d, magdev_med, roll_med, pitch_med,
+                     signal_ok, reasons, hr_est=None, spo2_est_ppg=None,
+                     gyro_med=0.0):
+        """Fire-and-forget stroke-risk analysis (daemon thread)."""
+        # Không cần brick init — chat HTTP trực tiếp (user-only, seed/temp cố định).
+        # (brick LargeLanguageModel.chat gửi system role -> CoT dài; init cũ treo
+        #  vô hạn khi runner 503 — đã loại bỏ)
+        if self._llm_busy:
+            # init/chat kẹt > 5 phút (vd runner đang 503 memory exhaustion):
+            # coi như treo, cho phép retry — thread cũ tự chết hoặc nằm rác
+            # (giới hạn bởi _llm_fails >= 5 gate, tối đa ~5 thread rác)
+            if time.time() - self._llm_busy_since > 300:
+                self._llm_busy = False
+            else:
+                return
+        now = time.time()
+        if now - self.last_llm_ts < CFG["LLM_COOLDOWN_S"]:
+            return
+        # Luôn trigger khi có bất thường; trigger lần đầu sau 3 packets
+        # để dashboard có chẩn đoán LLM sớm.
+        if not reasons and self.count < 3:
+            return
+        # KHÔNG gọi LLM khi không có gì đáng phân tích: finger=no + không
+        # có bpm thật + không bất thường -> model 0.8B CoT dài vô nghĩa
+        # (reason rác). Chỉ gọi khi có data thật (finger/bpm>0) hoặc reasons.
+        if not reasons and not (d.get("finger") or (d.get("bpm") or 0) > 0):
+            return
+        if not reasons and self._llm_fails >= 5:
+            # model hỏng liên tục — tạm ngưng 10 phút, sau đó thử lại
+            # (tránh chặn vĩnh viễn khi runner vừa mới hồi phục)
+            if time.time() - self._llm_fail_since < 600:
+                return
+            self._llm_fails = 0
+        if not reasons and self._llm_result is not None and self.count > 3:
+            # đã có chẩn đoán rồi — chỉ phân tích lại khi có bất thường
+            return
+        self.last_llm_ts = now
+        # lưu ngữ cảnh để fallback rule-based khi LLM không trả đúng format
+        self._last_llm_ctx = (
+            magdev_med, roll_med, pitch_med, list(reasons),
+            float(d.get("bpm") or 0), float(d.get("spo2") or 0))
+        motion_trend = [round(x, 2) for x in self.motion_hist][-10:]
+        ir = d.get("ir", 0)
+        red = d.get("red", 0)
+        ratio = (red / ir) if ir and ir > 0 else 0.0
+        hr = d.get("bpm") or 0.0
+        sp = d.get("spo2") or 0.0
+        # ESP32 không gửi bpm/spo2 -> dùng ước lượng PPG từ IR/RED nếu có
+        if hr <= 0 and hr_est:
+            hr, hr_est = hr_est, None
+        if sp <= 0 and spo2_est_ppg:
+            sp, spo2_est_ppg = spo2_est_ppg, None
+        hr_s = f"{hr:.0f}" if hr and hr > 0 else "NA"
+        sp_s = f"{sp:.0f}" if sp and sp > 0 else "NA"
+        est_s = " (est)" if (hr_s != "NA" or sp_s != "NA") and (d.get("bpm") or 0) <= 0 else ""
+        fing_s = "yes" if d.get("finger") else "no"
+        # ML suy đoán trước (0.1ms) -> LLM phán đoán với đủ context
+        try:
+            _cls, _pf = _mlfb.classify(magdev_med, roll_med, pitch_med, gyro_med)
+            ml_hint = f"ML={_cls}/{_pf * 100:.0f}%"
+        except Exception:
+            ml_hint = "ML=na"
+        prompt = (
+            "Bạn là trợ lý y tế. Dữ liệu: "
+            f"mag_dev={magdev_med:.2f} tilt={roll_med:.0f}/{pitch_med:.0f} "
+            f"gyro={gyro_med:.0f}deg/s "
+            f"HR={hr_s} SpO2={sp_s}{est_s} finger={fing_s} "
+            f"ir={ir:.0f} red={red:.0f} {ml_hint} flags={reasons[:1]}\n"
+            "Luật: HR=NA/SpO2=NA hoặc finger=no thì bỏ qua HR/SpO2; (est) là ước lượng PPG, "
+            "chỉ tham khảo; impact+lật=CRITICAL; impact=WARNING; gyro>150=WARNING "
+            "(xoay/lật nhanh); gyro 60-150=WARNING; lật>55°=WARNING; "
+            "SpO2<90 hoặc HR>120=CRITICAL; SpO2 91-93 hoặc HR 50-60=WARNING; "
+            "không có dữ liệu=NORMAL|LOW.\n"
+            "Trả về ĐÚNG 1 dòng: level|risk|lý do (tiếng Việt, <=60 ký tự). "
+            "Nếu ML=fall hoặc stroke_fall kèm HR/SpO2 bất thường -> nghi té ngã do "
+            "đột quỵ, ghi rõ trong lý do."
+            "level=NORMAL/WARNING/CRITICAL risk=LOW/MODERATE/HIGH."
+        )
+        self._llm_busy = True
+        self._llm_busy_since = time.time()
+        threading.Thread(
+            target=self._llm_worker,
+            args=(prompt, magdev_med, roll_med, pitch_med,
+                  float(d.get("bpm") or 0), float(d.get("spo2") or 0),
+                  gyro_med),
+            daemon=True).start()
+
+    # ------------------------------------------------------------------
+    def process(self, d):
+        """Nhận dict chuẩn hóa từ MQTT cloud (mqtt_client.normalize_payload)."""
+        try:
+            if not isinstance(d, dict):
+                return
+            self.count += 1
+            self.ts = float(d.get("ts", 0) or 0)
+            self.device = str(d.get("device", self.device))
+            self._last_pkt_ts = time.time()
+
+            ir = float(d.get("ir", 0) or 0)
+            red = float(d.get("red", 0) or 0)
+            ax = float(d.get("ax", 0) or 0)
+            ay = float(d.get("ay", 0) or 0)
+            az = float(d.get("az", 0) or 0)
+            gx = float(d.get("gx", 0) or 0)
+            gy = float(d.get("gy", 0) or 0)
+            gz = float(d.get("gz", 0) or 0)
+            bpm = d.get("bpm")
+            spo2 = d.get("spo2")
+            bpm = float(bpm) if bpm else 0.0
+            spo2 = float(spo2) if spo2 else 0.0
+
+            # ---- signal validity ----
+            # ESP32 raw ADC ~300 khi có tín hiệu; không có bpm/spo2 thật thì
+            # chỉ cần ir/red trên mức nhiễu. Firmware mới gửi "finger" thật;
+            # fallback ngưỡng IR cho bản cũ.
+            finger = bool(d.get("finger", False))
+            finger_ir = finger or ir >= CFG["MIN_IR_FINGER"] or red >= CFG["MIN_IR_FINGER"]
+            hr_valid = (bpm <= 0) or (30 <= bpm <= 220)
+            spo2_raw_ok = (spo2 <= 0) or (70 <= spo2 <= 100)
+            sample_valid = finger_ir and hr_valid and spo2_raw_ok
+
+            # ---- PPG: ước lượng HR/SpO2 từ IR/RED (ESP32 chỉ gửi raw) ----
+            # _ppg() tự gate theo sample rate: 1Hz (firmware hiện tại) -> HR/SpO2
+            # đều None (Nyquist không đủ), dashboard hiển thị "--" là ĐÚNG.
+            self.ir_buf.append(ir)
+            self.red_buf.append(red)
+            self.ts_buf.append(self.ts if self.ts > 0 else time.time() * 1000)
+            hr_est, spo2_est_ppg = self._ppg()
+
+            # ---- motion ----
+            mag = (ax * ax + ay * ay + az * az) ** 0.5
+            mag_dev = abs(mag - CFG["G"])
+            roll, pitch = d.get("roll"), d.get("pitch")
+            if roll is None or pitch is None:
+                roll, pitch = _tilt_from_accel(ax, ay, az)
+
+            self.raw.append((bpm, spo2, ir, mag_dev, roll, pitch))
+            self.valid.append(sample_valid)
+            self.tilt_win.append((roll, pitch))
+            self.gyro_win.append(max(abs(gx), abs(gy), abs(gz)))
+
+            window = list(self.raw)
+            valid_ratio = (sum(self.valid) / len(self.valid)) if self.valid else 0.0
+            signal_ok = valid_ratio >= CFG["MIN_VALID_RATIO"]
+
+            valid_samples = [w for w, v in zip(window, self.valid) if v]
+            hr_med = _median([w[0] for w in valid_samples]) if valid_samples else 0.0
+            sp_med = _median([w[1] for w in valid_samples]) if valid_samples else 0.0
+            magdev_med = _median([w[3] for w in window])
+            # tilt dùng window NHANH (~1s): lật board chỉ mất 1-2s, window 15 samples
+            # (3s) làm median nuốt mất tín hiệu lật
+            roll_med = _median([t[0] for t in self.tilt_win])
+            pitch_med = _median([t[1] for t in self.tilt_win])
+            gyro_med = _median(list(self.gyro_win))
+
+            # ---- conditions ----
+            reasons = []
+            score = 0.0
+
+            now = time.time()
+            self.magdev_baseline.append(magdev_med)
+            baseline = _median(list(self.magdev_baseline)) if self.magdev_baseline else 0.0
+            impact = magdev_med > CFG["MAG_DEV_FALL"] and magdev_med > baseline * CFG["IMPACT_MULT"]
+            if impact:
+                self.last_impact_ts = now
+
+            recent_impact = (now - self.last_impact_ts) < CFG["IMPACT_WINDOW"]
+            lying = (abs(roll_med) > CFG["TILT_FALL_DEG"]
+                     or abs(pitch_med) > CFG["TILT_FALL_DEG"])
+
+            # Fall detection: va đập + lật — score 0.8 => CRITICAL ngay,
+            # không cần cộng thêm HR/SpO2 (tín hiệu vật lý rõ ràng nhất)
+            if recent_impact and lying and signal_ok:
+                reasons.append(f"Ngã: va đập {magdev_med:.1f} m/s² + tư thế lật {roll_med:.0f}°")
+                score += 0.8
+            elif gyro_med > 150 and max(abs(roll_med), abs(pitch_med)) > 40 and signal_ok:
+                # Lật/xoay NHANH kèm nghiêng rõ (>40°): board xoay nhanh —
+                # mag_dev gần như không đổi khi xoay (gravity chỉ đổi hướng)
+                # nên impact không bắt được; gyro là tín hiệu chính cho lật.
+                # Nghiêng NHẸ (<40°) dù gyro cao = sinh hoạt thường, không báo.
+                reasons.append(f"Xoay/lật nhanh (gyro {gyro_med:.0f}°/s)")
+                score += 0.45
+            elif gyro_med > 60 and max(abs(roll_med), abs(pitch_med)) > 40 and signal_ok:
+                reasons.append(f"Chuyển động xoay/lật ({gyro_med:.0f}°/s)")
+                score += 0.35
+            elif magdev_med > CFG["MAG_DEV_FALL"] and signal_ok:
+                reasons.append(f"Va đập / chuyển động mạnh ({magdev_med:.1f} m/s² lệch)")
+                score += 0.45
+            elif lying and signal_ok:
+                # Lật rồi GIỮ YÊN (tilt mới > 55°) — không cần va đập trước đó
+                # (lật chậm/từ từ: gravity chỉ đổi hướng, mag_dev ~0)
+                reasons.append(f"Tư thế bất thường: nghiêng/lật {roll_med:.0f}°")
+                score += 0.4
+
+            # ---- HR/SpO2 rules: CHỈ khi ESP32 gửi giá trị thật (>0) ----
+            spo2_vals = [w[1] for w in valid_samples if w[1] > 0]
+            sp_stable = True
+            if len(spo2_vals) >= 3:
+                spread = max(spo2_vals) - min(spo2_vals)
+                sp_stable = spread <= CFG["SPO2_STABLE_SPREAD"]
+            elif len(spo2_vals) < 3:
+                sp_stable = False
+
+            if signal_ok:
+                if hr_med > CFG["HR_VERY_HIGH"]:
+                    reasons.append(f"Nhịp tim rất cao ({hr_med:.0f} BPM), nguy cơ thiếu máu não")
+                    score += 0.8
+                elif hr_med > CFG["HR_HIGH"]:
+                    reasons.append(f"Nhịp tim cao ({hr_med:.0f} BPM)")
+                    score += 0.4
+                elif 0 < hr_med < CFG["HR_LOW"]:
+                    reasons.append(f"Nhịp tim thấp ({hr_med:.0f} BPM)")
+                    score += 0.4
+
+                if sp_stable and 0 < sp_med < CFG["SPO2_CRIT"]:
+                    reasons.append(f"Thiếu oxy nghiêm trọng (SpO2 {sp_med:.0f}%)")
+                    score += 0.8
+                elif sp_stable and 0 < sp_med < CFG["SPO2_WARN"]:
+                    reasons.append(f"SpO2 thấp ({sp_med:.0f}%)")
+                    score += 0.4
+            else:
+                if magdev_med > CFG["MAG_DEV_FALL"]:
+                    reasons.append(f"Va đập / chuyển động mạnh ({magdev_med:.1f} m/s² lệch)")
+                    score += 0.45
+
+            # ---- level with debounce / hysteresis ----
+            # Lưu ý: data ESP32 vẫn đến nhưng signal xấu (không ngón tay) KHÔNG
+            # phải NO_SIGNAL — NO_SIGNAL chỉ do watchdog khi MẤT data MQTT thật.
+            level = "NORMAL"
+            if score >= 0.75:
+                level = "CRITICAL"
+            elif score >= 0.35:
+                level = "WARNING"
+
+            if level == "NORMAL":
+                self.bad_streak = 0
+                self.good_streak += 1
+            else:
+                self.good_streak = 0
+                self.bad_streak += 1
+
+            new_level = self.level
+            if level != "NORMAL" and self.bad_streak >= CFG["ESCALATE_SAMPLES"]:
+                new_level = level
+            elif level == "NORMAL" and self.good_streak >= CFG["RECOVER_SAMPLES"]:
+                new_level = "NORMAL"
+
+            if new_level != self.level:
+                self.level = new_level
+                self.level_since = time.time()
+                self._set_matrix(new_level)
+                if new_level != "NORMAL":
+                    self._push_alert(new_level, reasons)
+
+            # ---- LLM stroke-risk analysis (threaded, cooldown) ----
+            if reasons and signal_ok:
+                self._trigger_llm(d, magdev_med, roll_med, pitch_med,
+                                  signal_ok, reasons, hr_est, spo2_est_ppg,
+                                  gyro_med)
+            elif self.count <= 3:
+                # chẩn đoán ban đầu sớm (dashboard có content)
+                self._trigger_llm(d, magdev_med, roll_med, pitch_med,
+                                  signal_ok, reasons, hr_est, spo2_est_ppg,
+                                  gyro_med)
+            elif self._llm_result is None and self._llm_fails < 5:
+                # chưa có chẩn đoán nào (fail trước đó) -> retry khi có data
+                self._trigger_llm(d, magdev_med, roll_med, pitch_med,
+                                  signal_ok, reasons, hr_est, spo2_est_ppg,
+                                  gyro_med)
+
+            if hr_med > 0:
+                self.hr_hist.append(hr_med)
+            elif hr_est:
+                self.hr_hist.append(hr_est)
+            if sp_med > 0:
+                self.spo2_hist.append(sp_med)
+            elif spo2_est_ppg:
+                self.spo2_hist.append(spo2_est_ppg)
+            self.motion_hist.append(round(magdev_med, 3))
+            if ir > 0:
+                self.ratio_hist.append(round(red / ir, 4))
+
+            # ---- human log: GỌN — 1 dòng mỗi 10s + khi level đổi (hết spam serial) ----
+            if self.count % 50 == 1 or new_level != self.level:
+                hr_disp = f"{hr_med:.1f}" if hr_med else (f"~{hr_est:.0f}" if hr_est else "--")
+                sp_disp = f"{sp_med:.1f}%" if sp_med else (f"~{spo2_est_ppg:.0f}%" if spo2_est_ppg else "--")
+                print(
+                    f"[#{self.count}] {self.device} "
+                    f"HR={hr_disp} BPM | SpO2={sp_disp} | "
+                    f"Mag={mag:.2f} | Tilt={roll_med:.0f}/{pitch_med:.0f}° | "
+                    f"Gyro={gyro_med:.0f}°/s | "
+                    f"Sig={'OK' if signal_ok else 'LOW'} | "
+                    f"Status={self.level}"
+                    + (f" | {reasons[0]}" if reasons else ""),
+                    flush=True,
+                )
+
+            # ---- machine state for dashboard ----
+            self._write_state(hr_med, sp_med, magdev_med, signal_ok, valid_ratio,
+                              bpm, spo2, ir, red, roll_med, pitch_med,
+                              reasons, score, spo2_stable=sp_stable,
+                              spo2_raw_vals=spo2_vals,
+                              hr_est=hr_est, spo2_est_ppg=spo2_est_ppg)
+
+        except Exception as e:
+            print(f"[ERROR] {e}", flush=True)
+
+    # ------------------------------------------------------------------
+    def _ppg(self):
+        """Ước lượng HR/SpO2 từ chuỗi IR/RED + ts thực (ESP32 chỉ gửi raw).
+
+        Gate theo sample rate (Nyquist) — firmware ESP32 1Hz CỐ ĐỊNH:
+          - HR chỉ tin khi rate >= 4Hz (đo được 60-120 BPM thật). Ở 1Hz,
+            sóng xung bị alias thành ~30 BPM giả -> báo động "nhịp tim thấp"
+            sai; 1Hz KHÔNG đo được HR sinh lý nên trả None (dashboard "--").
+          - SpO2 chỉ tham khảo khi rate >= 2Hz — AC/DC ước lượng ở 1Hz quá
+            nhiễu (đã thấy spo2_est=86.8 ảo trên board).
+          - Window thời gian tối đa 40s — ESP32 pin yếu gửi msg thưa
+            (1 msg/3-4 phút) làm cửa sổ trải dài phút -> ratio vô nghĩa.
+        SpO2 = 110 - 25*R (MAX30102), R=(ACred/DCred)/(ACir/DCir).
+        HR = đếm đỉnh sóng IR / thời gian thực."""
+        n = len(self.ir_buf)
+        if n < 8:
+            return None, None
+        ts0 = self.ts_buf[0]
+        elapsed = (self.ts_buf[-1] - ts0) / 1000.0 if ts0 else 0.0
+        if elapsed < 4.0 or elapsed > 40.0:
+            return None, None
+        # sample rate thực tế = 1 / median(khoảng cách mẫu) — chống alias
+        intervals = [self.ts_buf[i + 1] - self.ts_buf[i]
+                     for i in range(n - 1) if self.ts_buf[i + 1] > self.ts_buf[i]]
+        if not intervals:
+            return None, None
+        med_int = _median(intervals) / 1000.0
+        if med_int <= 0:
+            return None, None
+        rate = 1.0 / med_int
+        irs = list(self.ir_buf)
+        reds = list(self.red_buf)
+        dc_ir = _median(irs)
+        dc_red = _median(reds)
+        if dc_ir <= 0 or dc_red <= 0:
+            return None, None
+        ac_ir = (max(irs) - min(irs)) / 2.0
+        ac_red = (max(reds) - min(reds)) / 2.0
+        # PPG ngón tay: phần AC ~0.5-5% DC. Dưới 0.2% = nhiễu phẳng, không có xung.
+        if ac_ir / dc_ir < 0.002 or ac_red / dc_red < 0.002:
+            return None, None
+        r = (ac_red / dc_red) / (ac_ir / dc_ir) if ac_ir > 0 else None
+        spo2 = None
+        if r is not None and rate >= 2.0:
+            spo2 = max(70.0, min(100.0, round(110.0 - 25.0 * r, 1)))
+        # HR: đếm đỉnh cục bộ trên phần AC của IR (ngưỡng 25% biên độ)
+        hr = None
+        if rate >= 4.0:   # <4Hz không đủ Nyquist cho HR 60-120 BPM
+            ac = [x - dc_ir for x in irs]
+            span = max(ac) - min(ac)
+            peaks = 0
+            if span > 0:
+                thr = 0.25 * span
+                for i in range(1, n - 1):
+                    if ac[i] > ac[i - 1] and ac[i] > ac[i + 1] and ac[i] > thr:
+                        peaks += 1
+            if peaks >= 2:
+                hr = round(peaks * 60.0 / elapsed, 0)
+                max_hr = 30.0 * rate   # tối đa tin cậy = rate/2 * 60
+                if not (30.0 <= hr <= min(200.0, max_hr)):
+                    hr = None          # alias / tốc độ mẫu quá thấp
+        return hr, spo2
+
+    # ------------------------------------------------------------------
+    def _push_alert(self, level, reasons):
+        now = time.time()
+        if now - self.last_alert_ts < 5:
+            return
+        self.last_alert_ts = now
+        self.alerts.append({
+            "ts": now,
+            "level": level,
+            "msg": "; ".join(reasons) if reasons else level,
+        })
+
+    # ------------------------------------------------------------------
+    def _set_matrix(self, level):
+        """Vẽ icon trạng thái lên LED matrix 8x13 qua Bridge (MCU sketch)."""
+        try:
+            frame = _MATRIX_FRAMES.get(level)
+            if frame is None:          # không dùng `or` — numpy array ép bool là lỗi
+                frame = _MATRIX_FRAMES["NORMAL"]
+            Bridge.call("draw",
+                        Frame.from_rows(frame.tolist(),
+                                        brightness_levels=8).to_board_bytes())
+            print(f"[MATRIX] level={level}", flush=True)
+        except Exception as e:
+            print(f"[MATRIX] err: {e}", flush=True)
+
+    # ------------------------------------------------------------------
+    def _write_state(self, hr, sp, magdev, signal_ok, valid_ratio,
+                     bpm_raw, spo2_raw, ir, red, roll, pitch, reasons, score,
+                     spo2_stable=True, spo2_raw_vals=None,
+                     hr_est=None, spo2_est_ppg=None):
+        llm = self._llm_result
+        if llm and time.time() - llm["ts"] > 300:   # stale after 5 min
+            llm = None
+        # ESP32 không gửi bpm/spo2 -> ưu tiên payload, fallback ước lượng PPG
+        hr_disp = hr if hr and hr > 0 else (hr_est or None)
+        sp_disp = sp if sp and sp > 0 else (spo2_est_ppg or None)
+        state = {
+            "ts": time.time(),
+            "uptime_ms": int(self.ts),
+            "count": self.count,
+            "source": "mqtt-cloud",
+            "device": self.device,
+            "signal": {
+                "ok": bool(signal_ok),
+                "valid_ratio": round(valid_ratio, 2),
+                "ir": int(ir),
+                "finger": bool(ir >= CFG["MIN_IR_FINGER"] or red >= CFG["MIN_IR_FINGER"]),
+            },
+            "vitals": {
+                "hr": round(hr_disp, 1) if hr_disp else None,
+                "spo2": round(sp_disp, 1) if sp_disp else None,
+                "motion_dev": round(magdev, 3),
+                "roll": round(roll, 1),
+                "pitch": round(pitch, 1),
+                "gyro": round(self.gyro_win[-1], 1) if self.gyro_win else 0.0,
+                "bpm_raw": round(bpm_raw, 1),
+                "spo2_raw": round(spo2_raw, 1),
+                "spo2_est": round(spo2_est_ppg, 1) if spo2_est_ppg else None,
+                "spo2_stable": bool(spo2_stable),
+                "hr_est": round(hr_est, 1) if hr_est else None,
+                "ppg": bool(hr_est or spo2_est_ppg),   # dashboard: số là ước lượng PPG
+            },
+            "status": {
+                "level": self.level,
+                "score": round(score, 2),
+                "reasons": reasons,
+                "since": self.level_since,
+                "llm": llm,
+            },
+            "history": {
+                "hr": [round(x, 1) for x in self.hr_hist][-60:],
+                "spo2": [round(x, 1) for x in self.spo2_hist][-60:],
+                "motion": list(self.motion_hist)[-60:],
+                "ratio": list(self.ratio_hist)[-60:],
+            },
+            "raw": {
+                "bpm": bpm_raw,
+                "spo2": spo2_raw,
+                "ir": int(ir),
+                "red": int(red),
+                "ir_ratio": round((red / ir), 4) if ir and ir > 0 else 0.0,
+                "spo2_recent": [round(v, 1) for v in (spo2_raw_vals or [])][-12:],
+            },
+            "alerts": list(self.alerts),
+        }
+        try:
+            path = CFG["STATE_FILE"]
+            tmp = path + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(state, f)
+            os.replace(tmp, path)  # atomic
+        except Exception as e:
+            print(f"[STATE-WRITE-ERR] {e}", flush=True)
+
+
+ai = StrokeGuard()
+ai._set_matrix("NORMAL")   # LED matrix: icon NORMAL lúc khởi động
+
+
+# ---------------------------------------------------------------------------
+# MQTT Cloud source (ESP32 -> HiveMQ Cloud -> UNO Q) — NGUỒN DỮ LIỆU DUY NHẤT
+# ---------------------------------------------------------------------------
+mqtt_sub = None
+try:
+    from mqtt_client import init_mqtt
+    mqtt_sub = init_mqtt(ai.process)
+    if mqtt_sub is not None:
+        print("[OK] MQTT Cloud subscriber ACTIVE (ESP32 -> HiveMQ -> UNO Q)",
+              flush=True)
+except ImportError as e:
+    print(f"[WARN] MQTT module không khả dụng: {e}", flush=True)
+except Exception as e:
+    print(f"[WARN] Khởi tạo MQTT lỗi: {e}", flush=True)
+
+
+def _mqtt_watchdog():
+    """Nếu không nhận data MQTT trong NO_SIGNAL_SEC => level NO_SIGNAL.
+    Nếu stale kéo dài (nghi kết nối/subscription bị đóng băng phía broker)
+    => cắt + nối lại MQTT chủ động (tối đa 1 lần/phút)."""
+    last_reconnect = 0.0
+    while True:
+        try:
+            if mqtt_sub is not None:
+                fresh = mqtt_sub.active_recently(window=CFG["NO_SIGNAL_SEC"])
+                if not fresh and ai.level != "NO_SIGNAL" and ai.level != "CRITICAL":
+                    if ai._last_pkt_ts > 0:
+                        ai.level = "NO_SIGNAL"
+                        ai.level_since = time.time()
+                        ai._set_matrix("NO_SIGNAL")
+                        ai._push_alert("NO_SIGNAL",
+                                       ["Mất data từ ESP32 (MQTT stale)"])
+                        print("[WATCHDOG] MQTT stale -> NO_SIGNAL", flush=True)
+                if fresh and ai.level == "NO_SIGNAL":
+                    ai.level = "NORMAL"
+                    ai.level_since = time.time()
+                    ai._set_matrix("NORMAL")
+                    print("[WATCHDOG] MQTT data trở lại -> NORMAL", flush=True)
+                # reconnect chủ động khi stale > 4 chu kỳ và cách lần cuối >60s
+                if (not fresh and ai._last_pkt_ts > 0
+                        and time.time() - ai._last_pkt_ts > CFG["NO_SIGNAL_SEC"] * 4
+                        and time.time() - last_reconnect > 60):
+                    last_reconnect = time.time()
+                    print("[WATCHDOG] MQTT stale kéo dài -> reconnect chủ động",
+                          flush=True)
+                    mqtt_sub.reconnect_now()
+        except Exception as e:
+            print(f"[WATCHDOG-ERR] {e}", flush=True)
+        time.sleep(2)
+
+
+threading.Thread(target=_mqtt_watchdog, daemon=True).start()
+
+print("=" * 55)
+print("        StrokeGuard AI  (MQTT-Cloud only + LLM)")
+print("        Arduino UNO Q + Qwen3.5-0.8B-Q4_0")
+print("        Nguồn data: ESP32 sensor node (MQTT Cloud)")
+print("=" * 55)
+print("[OK] Bỏ sensor local (Bridge) — data chỉ từ MQTT Cloud")
+print("[OK] Alert engine + LLM stroke-risk re-analysis (threaded)")
+print(f"[OK] Chờ data MQTT từ ESP32... (LLM cooldown {CFG['LLM_COOLDOWN_S']}s)",
+      flush=True)
+
+App.run()

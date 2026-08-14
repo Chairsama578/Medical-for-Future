@@ -1,0 +1,9 @@
+# ignore app cache folder
+.cache/
+
+# Python-generated files
+__pycache__/
+*.py[cod]
+
+# Local credentials and runtime configuration
+python/mqtt_config.json
