@@ -1,0 +1,9 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {"label":"Generate synthetic data","type":"shell","command":"python scripts/generate_dataset.py"},
+    {"label":"Train edge model","type":"shell","command":"python scripts/train.py"},
+    {"label":"Evaluate model","type":"shell","command":"python scripts/evaluate.py"},
+    {"label":"Run demo","type":"shell","command":"python scripts/run_demo.py --scenario critical"}
+  ]
+}

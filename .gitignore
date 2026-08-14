@@ -5,5 +5,27 @@
 __pycache__/
 *.py[cod]
 
+.venv/
+.pytest_cache/
+.env
+*.log
+*.zip
+*.7z
+*.rar
+*.db
+models/*.joblib
+models/*.pkl
+data/raw/*
+!data/raw/README.md
+data/raw/uci_har/
+data/raw/uci_postural/
+data/raw/physiology/
+!data/raw/umafall/
+data/raw/umafall/*
+!data/raw/umafall/provenance.json
+data/generated/*.csv
+data/unified/*
+models/v4/*.joblib
+
 # Local credentials and runtime configuration
 python/mqtt_config.json

@@ -1,0 +1,29 @@
+mode: simulator
+v4_enabled: true
+poll_hz: 5
+window_seconds: 8
+model_path: models/strokeguard_edge.json
+
+safety:
+  persist_windows: 2
+  critical_score: 0.80
+  warning_score: 0.55
+  sensor_quality_min: 0.60
+
+alerts:
+  local_alert_on_critical: true
+  local_alert_on_warning: true
+  local_alert_on_sos: true
+  local_alert_on_fast: true
+  caregiver_webhook_optional: null
+
+emergency:
+  medical_number_vietnam: "115"
+  national_emergency_vietnam: "112"
+
+sensor_ranges:
+  heart_rate_bpm: [35, 220]
+  spo2_pct: [70, 100]
+  systolic_bp_mmhg: [70, 260]
+  diastolic_bp_mmhg: [40, 160]
+  accel_g: [-8, 8]

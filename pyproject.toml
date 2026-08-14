@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "strokeguard-ai"
+version = "3.0.0"
+description = "StrokeGuard AI Edge pipeline for Arduino UNO Q"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
